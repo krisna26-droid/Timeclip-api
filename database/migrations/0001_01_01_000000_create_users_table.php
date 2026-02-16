@@ -15,8 +15,11 @@ return new class extends Migration
             $table->id();
             $table->string('name');
             $table->string('email')->unique();
-            $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
+            $table->enum('role', ['admin', 'creator'])->default('creator'); // [cite: 192]
+            $table->enum('tier', ['free', 'starter', 'pro', 'business'])->default('free'); // [cite: 193]
+            $table->integer('remaining_credits')->default(10); // [cite: 195]
+            $table->date('last_reset_date')->nullable(); // [cite: 194]
             $table->rememberToken();
             $table->timestamps();
         });
