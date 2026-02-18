@@ -3,27 +3,40 @@
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
-use App\Http\Controllers\Api\MockController;
+use App\Http\Controllers\Api\VideoController;
+use App\Http\Controllers\Api\ClipController;
 
 /*
 |--------------------------------------------------------------------------
-| API ASLI (Tersambung ke Database)
+| API PUBLIC (Tanpa Login)
 |--------------------------------------------------------------------------
 */
+
 Route::post('/register', [AuthController::class, 'register']);
-Route::post('/login', [AuthController::class, 'login']);
-
+Route::post('/login', [AuthController::class, 'login'])->name('login');
 
 /*
 |--------------------------------------------------------------------------
-| MOCK API (Untuk Kebutuhan Testing Frontend)
+| API PROTECTED (Wajib Bearer Token Sanctum)
 |--------------------------------------------------------------------------
-| Prefix: /api/mock/...
 */
-Route::prefix('mock')->group(function () {
-    Route::post('/login', [MockController::class, 'login']);
-    Route::post('/register', [MockController::class, 'register']);
-    Route::get('/videos', [MockController::class, 'indexVideos']);
-    Route::get('/videos/{id}/clips', [MockController::class, 'getClips']);
-    Route::post('/clips/{id}/ask-ai', [MockController::class, 'askAi']);
+Route::middleware('auth:sanctum')->group(function () {
+
+    // 1. User Management & Credits
+    Route::get('/user/credits', function (Request $request) {
+        return response()->json([
+            'remaining_credits' => $request->user()->remaining_credits,
+            'tier' => $request->user()->tier
+        ]);
+    });
+
+    // 2. Library Video (Master Video)
+    Route::get('/videos', [VideoController::class, 'index']);
+    Route::post('/videos/process', [VideoController::class, 'store']);
+
+    // 3. Clip Management (Hasil Potongan AI)
+    // Mengambil semua klip dari satu video spesifik
+    Route::get('/videos/{video_id}/clips', [ClipController::class, 'index']);
+    // Mengambil detail satu klip (untuk Editor/Preview)
+    Route::get('/clips/{id}', [ClipController::class, 'show']);
 });
