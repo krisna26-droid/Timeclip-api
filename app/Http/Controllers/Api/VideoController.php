@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Auth;
 
 class VideoController extends Controller
 {
-    // GET /api/videos - Library Video User [cite: 241]
+    // GET /api/videos - Library Video User
     public function index()
     {
         $videos = Auth::user()->videos()->latest()->get();
@@ -19,36 +19,47 @@ class VideoController extends Controller
         ]);
     }
 
-    // POST /api/videos/process - Input Video Baru [cite: 241]
+    // POST /api/videos/process - Input Video Baru
     public function store(Request $request)
     {
-        // Validasi sesuai batasan proyek [cite: 243, 244, 245]
         $request->validate([
             'title' => 'required|string|max:255',
-            'url' => 'required|url', // YouTube atau TikTok [cite: 245]
-            'duration' => 'required|integer|max:1800', // Maksimal 30 menit [cite: 244]
+            'url' => 'required|url',
+            'duration' => 'required|integer|max:1800',
         ]);
 
-        // Cek saldo kredit user sebelum proses [cite: 247]
-        if (Auth::user()->remaining_credits < 1) {
+        $user = Auth::user();
+
+        // 1. Cek biaya (Fixed 10 token sesuai diskusi)
+        if ($user->tier !== 'business' && $user->remaining_credits < 10) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Saldo kredit tidak mencukupi.'
+                'message' => 'Saldo tidak cukup. Butuh minimal 10 token untuk memproses video.'
             ], 403);
         }
 
+        // 2. Proses pembuatan record video
         $video = Video::create([
-            'user_id' => Auth::id(),
+            'user_id' => $user->id,
             'title' => $request->title,
             'source_url' => $request->url,
             'duration' => $request->duration,
-            'status' => 'pending', // [cite: 207]
+            'status' => 'pending',
         ]);
+
+        // 3. Potong saldo jika bukan Business
+        if ($user->tier !== 'business') {
+            $user->decrement('remaining_credits', 10);
+        }
 
         return response()->json([
             'status' => 'success',
-            'message' => 'Video berhasil dikirim ke antrean.',
-            'data' => $video
+            'message' => 'Video berhasil dikirim. Saldo terpotong 10 token.',
+            'data' => $video,
+            'user_stats' => [
+                'remaining_credits' => $user->remaining_credits,
+                'tier' => $user->tier
+            ]
         ], 201);
     }
 }

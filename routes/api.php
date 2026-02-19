@@ -24,9 +24,19 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // 1. User Management & Credits
     Route::get('/user/credits', function (Request $request) {
+        $user = $request->user();
+
+        $maxCap = [
+            'free' => 10,
+            'starter' => 100,
+            'pro' => 300,
+            'business' => 'unlimited'
+        ];
+
         return response()->json([
             'remaining_credits' => $request->user()->remaining_credits,
-            'tier' => $request->user()->tier
+            'tier' => $request->user()->tier,
+            'max_cap' => $maxCap[$request->user()->tier] ?? 10
         ]);
     });
 
