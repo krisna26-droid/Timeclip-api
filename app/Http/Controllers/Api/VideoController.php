@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Video;
 use Illuminate\Support\Facades\Auth;
+use App\Jobs\DownloadVideoJob;
 
 class VideoController extends Controller
 {
@@ -25,20 +26,31 @@ class VideoController extends Controller
         $request->validate([
             'title' => 'required|string|max:255',
             'url' => 'required|url',
-            'duration' => 'required|integer|max:1800',
+            'duration' => 'required|integer|max:1800', // Maksimal 30 menit [cite: 244]
         ]);
 
         $user = Auth::user();
 
-        // 1. Cek biaya (Fixed 10 token sesuai diskusi)
+        // Validasi Concurrency: Maksimal 2 proses aktif 
+        $activeProcesses = Video::where('user_id', $user->id)
+            ->whereIn('status', ['pending', 'processing'])
+            ->count();
+
+        if ($activeProcesses >= 2) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Anda memiliki 2 proses yang sedang berjalan. Tunggu hingga selesai.'
+            ], 429);
+        }
+
+        // Validasi Saldo Kredit [cite: 246, 247]
         if ($user->tier !== 'business' && $user->remaining_credits < 10) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Saldo tidak cukup. Butuh minimal 10 token untuk memproses video.'
+                'message' => 'Saldo tidak cukup. Butuh 10 kredit.'
             ], 403);
         }
 
-        // 2. Proses pembuatan record video
         $video = Video::create([
             'user_id' => $user->id,
             'title' => $request->title,
@@ -47,19 +59,16 @@ class VideoController extends Controller
             'status' => 'pending',
         ]);
 
-        // 3. Potong saldo jika bukan Business
+        DownloadVideoJob::dispatch($video);
+
         if ($user->tier !== 'business') {
             $user->decrement('remaining_credits', 10);
         }
 
         return response()->json([
             'status' => 'success',
-            'message' => 'Video berhasil dikirim. Saldo terpotong 10 token.',
-            'data' => $video,
-            'user_stats' => [
-                'remaining_credits' => $user->remaining_credits,
-                'tier' => $user->tier
-            ]
+            'message' => 'Video berhasil masuk antrean.',
+            'data' => $video
         ], 201);
     }
 }
