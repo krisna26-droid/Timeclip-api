@@ -1,6 +1,5 @@
 <?php
 
-// App/Jobs/DownloadVideoJob.php
 namespace App\Jobs;
 
 use App\Models\Video;
@@ -27,9 +26,10 @@ class DownloadVideoJob implements ShouldQueue
 
     public function handle()
     {
+        // Set status ke processing sesuai migration [cite: 207]
         $this->video->update(['status' => 'processing']);
 
-        // Sesuaikan dengan struktur: storage/app/private/raw_videos [cite: 333]
+        // Simpan di folder private agar aman [cite: 333, 369]
         $folderPath = storage_path('app/private/raw_videos');
         if (!File::exists($folderPath)) {
             File::makeDirectory($folderPath, 0755, true);
@@ -40,12 +40,9 @@ class DownloadVideoJob implements ShouldQueue
 
         $process = new Process([
             $ytDlpPath,
-            '-f',
-            'bestvideo[height<=720]+bestaudio/best',
-            '--merge-output-format',
-            'mp4',
-            '-o',
-            $outputPath,
+            '-f', 'bestvideo[height<=720]+bestaudio/best',
+            '--merge-output-format', 'mp4',
+            '-o', $outputPath,
             $this->video->source_url
         ]);
 
@@ -57,16 +54,22 @@ class DownloadVideoJob implements ShouldQueue
             if (File::exists($outputPath)) {
                 $this->video->update([
                     'status' => 'completed',
-                    // Simpan path relatif untuk database
                     'file_path' => 'private/raw_videos/' . $this->video->id . '.mp4'
                 ]);
+
+                // OTOMATIS LANJUT KE TAHAP 5: AI Transcription Pipeline [cite: 60, 316, 342]
+                ProcessTranscription::dispatch($this->video);
+
             } else {
-                throw new \Exception("File tidak ditemukan.");
+                throw new \Exception("File tidak ditemukan setelah download.");
             }
         } catch (\Exception $e) {
-            Log::error("Download Failed: " . $e->getMessage());
+            Log::error("Download Failed ID {$this->video->id}: " . $e->getMessage());
             $this->video->update(['status' => 'failed']);
-            if (File::exists($outputPath)) File::delete($outputPath);
+            
+            if (File::exists($outputPath)) {
+                File::delete($outputPath);
+            }
         }
     }
 }
