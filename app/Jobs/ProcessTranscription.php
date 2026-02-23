@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Video;
 use App\Models\Transcription;
-use App\Services\GeminiService; // Import Service yang baru kita buat
+use App\Services\GeminiService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -19,56 +19,91 @@ class ProcessTranscription implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public $video;
-    public $timeout = 900; // Ditingkatkan menjadi 15 menit karena proses AI butuh waktu
+    public $timeout = 900; // 15 menit
 
     public function __construct(Video $video)
     {
         $this->video = $video;
     }
 
-    /**
-     * Laravel akan otomatis menyuntikkan GeminiService ke sini
-     */
     public function handle(GeminiService $gemini): void
     {
-        Log::info("Tahap 5: Memulai Ekstraksi & Transkripsi untuk Video ID: " . $this->video->id);
-
-        $videoPath = storage_path('app/' . $this->video->file_path);
-        $audioPath = str_replace('.mp4', '.mp3', $videoPath);
-
-        // 1. Validasi File Video
-        if (!File::exists($videoPath)) {
-            Log::error("File video tidak ditemukan: " . $videoPath);
-            $this->video->update(['status' => 'failed']);
-            return;
-        }
-
-        // 2. Ekstraksi Audio menggunakan FFmpeg
-        $process = new Process([
-            'ffmpeg', '-i', $videoPath, '-q:a', '0', '-map', 'a', '-y', $audioPath
+        Log::info("=== PROCESS TRANSCRIPTION START ===", [
+            'video_id' => $this->video->id
         ]);
 
+        $this->video->update(['status' => 'processing']);
+
+        $videoPath = storage_path('app/' . $this->video->file_path);
+        $audioDirectory = storage_path('app/private/audio');
+
+        if (!File::exists($audioDirectory)) {
+            File::makeDirectory($audioDirectory, 0755, true);
+        }
+
+        $audioPath = $audioDirectory . '/' . $this->video->id . '.mp3';
+
         try {
-            $process->mustRun();
-            Log::info("Ekstraksi Audio Berhasil: " . $audioPath);
 
-            // 3. Kirim ke Gemini AI untuk Transkripsi
-            Log::info("Mengirim audio ke Gemini AI...");
-            $aiResult = $gemini->transcribe($audioPath);
+            if (!File::exists($videoPath)) {
+                throw new \Exception("File video tidak ditemukan: " . $videoPath);
+            }
 
-            // 4. Simpan Hasil ke Database
-            Transcription::create([
-                'video_id' => $this->video->id,
-                'full_text' => $aiResult['full_text'],
-                'json_data' => $aiResult['words'], // Menyimpan word-level timestamps
+            Log::info("Video ditemukan", ['path' => $videoPath]);
+            Log::info("Output audio path", ['path' => $audioPath]);
+
+            // COMMAND WINDOWS SAFE
+            $command = 'ffmpeg -y -i "' . $videoPath . '" -vn -acodec libmp3lame "' . $audioPath . '"';
+
+            Log::info("Menjalankan FFmpeg", ['command' => $command]);
+
+            $process = Process::fromShellCommandline($command);
+            $process->setTimeout(600);
+            $process->run();
+
+            Log::info("FFmpeg stdout:", [
+                'output' => $process->getOutput()
             ]);
 
-            // 5. Update Status Video menjadi Completed
-            $this->video->update(['status' => 'completed']);
-            Log::info("Tahap 5 SELESAI untuk Video ID: " . $this->video->id);
+            Log::info("FFmpeg stderr:", [
+                'error' => $process->getErrorOutput()
+            ]);
 
-        } catch (\Exception $e) {
-            Log::error("Gagal di Tahap 5: " . $e->getMessage());
+            if (!$process->isSuccessful()) {
+                throw new \Exception("FFmpeg gagal dijalankan.");
+            }
+
+            if (!File::exists($audioPath)) {
+                throw new \Exception("MP3 tidak berhasil dibuat.");
+            }
+
+            Log::info("Audio berhasil diekstrak", [
+                'path' => $audioPath
+            ]);
+
+            // 🔹 TRANSKRIPSI
+            $aiResult = $gemini->transcribe($audioPath);
+
+            Transcription::create([
+                'video_id'  => $this->video->id,
+                'full_text' => $aiResult['full_text'] ?? '',
+                'json_data' => json_encode($aiResult)
+            ]);
+
+            $this->video->update([
+                'status' => 'completed'
+            ]);
+
+            Log::info("=== PROCESS TRANSCRIPTION SUCCESS ===", [
+                'video_id' => $this->video->id
+            ]);
+        } catch (\Throwable $e) {
+
+            Log::error("PROCESS TRANSCRIPTION FAILED", [
+                'video_id' => $this->video->id,
+                'message'  => $e->getMessage()
+            ]);
+
             $this->video->update(['status' => 'failed']);
         }
     }
