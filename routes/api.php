@@ -34,9 +34,9 @@ Route::middleware('auth:sanctum')->group(function () {
         ];
 
         return response()->json([
-            'remaining_credits' => $request->user()->remaining_credits,
-            'tier' => $request->user()->tier,
-            'max_cap' => $maxCap[$request->user()->tier] ?? 10
+            'remaining_credits' => $user->remaining_credits,
+            'tier' => $user->tier,
+            'max_cap' => $maxCap[$user->tier] ?? 10
         ]);
     });
 
@@ -44,9 +44,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/videos', [VideoController::class, 'index']);
     Route::post('/videos/process', [VideoController::class, 'store']);
 
-    // 3. Clip Management (Hasil Potongan AI)
+    // 3. Clip Management & AI Agent
     // Mengambil semua klip dari satu video spesifik
     Route::get('/videos/{video_id}/clips', [ClipController::class, 'index']);
+    
+    // 🔥 TAHAP 7: Ask AI Agent (Mencari momen spesifik via chat/query)
+    // Endpoint: POST /api/videos/{video_id}/ask-ai
+    Route::post('/videos/{video_id}/ask-ai', [ClipController::class, 'askAI']);
+    
     // Mengambil detail satu klip (untuk Editor/Preview)
     Route::get('/clips/{id}', [ClipController::class, 'show']);
 });

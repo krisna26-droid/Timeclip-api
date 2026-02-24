@@ -19,7 +19,7 @@ class ProcessTranscription implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public $video;
-    public $timeout = 900; // 15 menit
+    public $timeout = 900;
 
     public function __construct(Video $video)
     {
@@ -28,82 +28,38 @@ class ProcessTranscription implements ShouldQueue
 
     public function handle(GeminiService $gemini): void
     {
-        Log::info("=== PROCESS TRANSCRIPTION START ===", [
-            'video_id' => $this->video->id
-        ]);
+        Log::info("=== PROCESS TRANSCRIPTION START ===", ['video_id' => $this->video->id]);
 
         $this->video->update(['status' => 'processing']);
-
         $videoPath = storage_path('app/' . $this->video->file_path);
-        $audioDirectory = storage_path('app/private/audio');
-
-        if (!File::exists($audioDirectory)) {
-            File::makeDirectory($audioDirectory, 0755, true);
-        }
-
-        $audioPath = $audioDirectory . '/' . $this->video->id . '.mp3';
+        $audioPath = storage_path('app/private/audio/' . $this->video->id . '.mp3');
 
         try {
-
-            if (!File::exists($videoPath)) {
-                throw new \Exception("File video tidak ditemukan: " . $videoPath);
-            }
-
-            Log::info("Video ditemukan", ['path' => $videoPath]);
-            Log::info("Output audio path", ['path' => $audioPath]);
-
-            // COMMAND WINDOWS SAFE
+            // Ekstraksi Audio menggunakan FFmpeg
             $command = 'ffmpeg -y -i "' . $videoPath . '" -vn -acodec libmp3lame "' . $audioPath . '"';
-
-            Log::info("Menjalankan FFmpeg", ['command' => $command]);
-
             $process = Process::fromShellCommandline($command);
-            $process->setTimeout(600);
             $process->run();
 
-            Log::info("FFmpeg stdout:", [
-                'output' => $process->getOutput()
-            ]);
+            if (!$process->isSuccessful()) throw new \Exception("FFmpeg gagal.");
 
-            Log::info("FFmpeg stderr:", [
-                'error' => $process->getErrorOutput()
-            ]);
-
-            if (!$process->isSuccessful()) {
-                throw new \Exception("FFmpeg gagal dijalankan.");
-            }
-
-            if (!File::exists($audioPath)) {
-                throw new \Exception("MP3 tidak berhasil dibuat.");
-            }
-
-            Log::info("Audio berhasil diekstrak", [
-                'path' => $audioPath
-            ]);
-
-            // 🔹 TRANSKRIPSI
+            // 🔹 Tahap Transkripsi AI
             $aiResult = $gemini->transcribe($audioPath);
 
-            Transcription::create([
+            $transcription = Transcription::create([
                 'video_id'  => $this->video->id,
                 'full_text' => $aiResult['full_text'] ?? '',
-                'json_data' => json_encode($aiResult)
+                'json_data' => $aiResult // Cast array otomatis di model
             ]);
 
-            $this->video->update([
-                'status' => 'completed'
-            ]);
+            $this->video->update(['status' => 'completed']);
 
-            Log::info("=== PROCESS TRANSCRIPTION SUCCESS ===", [
-                'video_id' => $this->video->id
-            ]);
+            // 🔹 Lanjut ke Tahap Kurasi Klip
+            DiscoverHighlightsJob::dispatch($this->video, $transcription);
+
+            Log::info("=== TRANSCRIPTION SUCCESS & HIGHLIGHT DISPATCHED ===");
+
         } catch (\Throwable $e) {
-
-            Log::error("PROCESS TRANSCRIPTION FAILED", [
-                'video_id' => $this->video->id,
-                'message'  => $e->getMessage()
-            ]);
-
+            Log::error("TRANSCRIPTION FAILED: " . $e->getMessage());
             $this->video->update(['status' => 'failed']);
         }
     }
