@@ -12,6 +12,8 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+// Pastikan Job Render di-import dengan benar
+use App\Jobs\ProcessVideoClipJob;
 
 class DiscoverHighlightsJob implements ShouldQueue
 {
@@ -32,17 +34,26 @@ class DiscoverHighlightsJob implements ShouldQueue
 
         $highlights = $highlightService->getHighlights($this->transcription->full_text);
 
+        if (empty($highlights)) {
+            Log::warning("AI tidak menemukan highlight untuk video ID: " . $this->video->id);
+            return;
+        }
+
         foreach ($highlights as $item) {
-            Clip::create([
+            // TAMPUNG hasil create ke variabel $clip agar bisa digunakan di dispatch
+            $clip = Clip::create([
                 'video_id'    => $this->video->id,
                 'title'       => $item['title'] ?? 'Untitled Clip',
                 'start_time'  => $item['start_time'] ?? 0,
                 'end_time'    => $item['end_time'] ?? 0,
                 'viral_score' => $item['viral_score'] ?? 0,
-                'status'      => 'rendering' // Siap untuk tahap render
+                'status'      => 'rendering' 
             ]);
+
+            // PICU proses pemotongan video fisik (Tahap 8)
+            ProcessVideoClipJob::dispatch($clip);
         }
 
-        Log::info("Created " . count($highlights) . " clip plans in database.");
+        Log::info("Berhasil membuat " . count($highlights) . " rencana klip dan memicu antrean render.");
     }
 }
