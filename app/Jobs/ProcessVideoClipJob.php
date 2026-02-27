@@ -41,17 +41,18 @@ class ProcessVideoClipJob implements ShouldQueue
         $outputPath = $outputDir . '/' . $outputFileName;
 
         // Filter: Resize ke tinggi 1080 dulu, baru crop tengah 608px (aspek rasio 9:16)
-        // Formula: crop=width:height:x:y
+        // Formula: scale=-1:1080 (menjaga aspek rasio), crop=width:height:x:y
         $ffmpegFilter = "scale=-1:1080,crop=608:1080:(in_w-608)/2:0";
 
         $duration = $this->clip->end_time - $this->clip->start_time;
 
         $command = [
-            'ffmpeg', '-y',
-            '-ss', (string) $this->clip->start_time,
-            '-t', (string) $duration,
+            'ffmpeg',
+            '-y',
+            '-ss', (string) $this->clip->start_time, // Detik mulai
+            '-t', (string) $duration,                // Durasi klip
             '-i', $inputPath,
-            '-vf', $ffmpegFilter,
+            '-vf', $ffmpegFilter,                    // Terapkan Crop Portrait
             '-c:v', 'libx264',
             '-preset', 'fast',
             '-crf', '23',
