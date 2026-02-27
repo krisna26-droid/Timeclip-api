@@ -14,6 +14,8 @@ use App\Http\Controllers\Api\ClipController;
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login'])->name('login');
+Route::get('/auth/github/redirect', [AuthController::class, 'githubRedirect']);
+Route::get('/auth/github/callback', [AuthController::class, 'githubCallback']);
 
 /*
 |--------------------------------------------------------------------------
