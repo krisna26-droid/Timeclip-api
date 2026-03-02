@@ -20,6 +20,7 @@ class ProcessTranscription implements ShouldQueue
 
     public $video;
     public $timeout = 900;
+    public $tries = 2;
 
     public function __construct(Video $video)
     {
@@ -31,36 +32,74 @@ class ProcessTranscription implements ShouldQueue
         Log::info("=== PROCESS TRANSCRIPTION START ===", ['video_id' => $this->video->id]);
 
         $this->video->update(['status' => 'processing']);
+
         $videoPath = storage_path('app/' . $this->video->file_path);
-        $audioPath = storage_path('app/private/audio/' . $this->video->id . '.mp3');
+        $audioDir  = storage_path('app/private/audio');
+        $audioPath = $audioDir . '/' . $this->video->id . '.mp3';
+
+        // Pastikan folder audio ada
+        if (!File::exists($audioDir)) {
+            File::makeDirectory($audioDir, 0755, true);
+        }
+
+        // Validasi video input ada
+        if (!File::exists($videoPath)) {
+            Log::error("Video file tidak ditemukan: " . $videoPath);
+            $this->video->update(['status' => 'failed']);
+            return;
+        }
 
         try {
-            // Ekstraksi Audio menggunakan FFmpeg
-            $command = 'ffmpeg -y -i "' . $videoPath . '" -vn -acodec libmp3lame "' . $audioPath . '"';
-            $process = Process::fromShellCommandline($command);
+            // FIX: Pakai array process, bukan string interpolasi (hindari injection risk)
+            $process = new Process([
+                'ffmpeg', '-y',
+                '-i', $videoPath,
+                '-vn',
+                '-acodec', 'libmp3lame',
+                '-q:a', '2',
+                $audioPath
+            ]);
+            $process->setTimeout(600);
             $process->run();
 
-            if (!$process->isSuccessful()) throw new \Exception("FFmpeg gagal.");
+            if (!$process->isSuccessful()) {
+                throw new \Exception("FFmpeg ekstraksi audio gagal: " . $process->getErrorOutput());
+            }
 
-            // 🔹 Tahap Transkripsi AI
+            // Transkripsi AI
             $aiResult = $gemini->transcribe($audioPath);
 
             $transcription = Transcription::create([
                 'video_id'  => $this->video->id,
                 'full_text' => $aiResult['full_text'] ?? '',
-                'json_data' => $aiResult // Cast array otomatis di model
+                'json_data' => $aiResult
             ]);
 
             $this->video->update(['status' => 'completed']);
 
-            // 🔹 Lanjut ke Tahap Kurasi Klip
+            // Lanjut ke highlight discovery
             DiscoverHighlightsJob::dispatch($this->video, $transcription);
 
-            Log::info("=== TRANSCRIPTION SUCCESS & HIGHLIGHT DISPATCHED ===");
+            Log::info("=== TRANSCRIPTION SUCCESS & HIGHLIGHT DISPATCHED ===", ['video_id' => $this->video->id]);
+
+            // NOTE: File audio TIDAK dihapus di sini karena masih dipakai
+            // oleh ProcessVideoClipJob untuk referensi transkripsi.
+            // Hapus manual setelah semua clip selesai jika perlu hemat storage.
 
         } catch (\Throwable $e) {
-            Log::error("TRANSCRIPTION FAILED: " . $e->getMessage());
+            Log::error("TRANSCRIPTION FAILED: " . $e->getMessage(), ['video_id' => $this->video->id]);
             $this->video->update(['status' => 'failed']);
+
+            // Bersihkan file audio yang mungkin corrupt
+            if (File::exists($audioPath)) {
+                File::delete($audioPath);
+            }
         }
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::error("ProcessTranscription permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
+        $this->video->update(['status' => 'failed']);
     }
 }
