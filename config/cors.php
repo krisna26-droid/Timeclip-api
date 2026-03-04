@@ -8,7 +8,7 @@ return [
     */
 
     // Menambahkan 'videos/*' agar route pemrosesan video diizinkan
-    'paths' => ['api/*', 'sanctum/csrf-cookie', 'videos/*'],
+    'paths' => ['api/*', 'sanctum/csrf-cookie', 'videos/*', 'login', 'register'],
 
     'allowed_methods' => ['*'],
 
