@@ -6,16 +6,6 @@ use Illuminate\Support\Facades\Log;
 
 class CaptionService
 {
-    /**
-     * Generate file .ASS (Advanced SubStation Alpha) dengan karaoke style.
-     * File .ASS mendukung animasi per kata yang tidak bisa dilakukan oleh .SRT/.VTT.
-     *
-     * @param array  $words      [{word, start, end}, ...] dari Gemini (bisa kosong)
-     * @param string $fullText   Teks lengkap sebagai fallback
-     * @param float  $clipStart  Waktu mulai clip di video asli (detik)
-     * @param float  $clipEnd    Waktu selesai clip di video asli (detik)
-     * @param string $outputPath Path lengkap untuk menyimpan file .ass
-     */
     public function generateAss(
         array  $words,
         string $fullText,
@@ -23,100 +13,48 @@ class CaptionService
         float  $clipEnd,
         string $outputPath
     ): void {
-        // Jika words dari Gemini kosong, generate estimasi dari full_text
+
         if (empty($words)) {
-            Log::info("CaptionService: words kosong, generate estimasi dari full_text.");
+            Log::info("Words kosong, estimasi otomatis.");
             $words = $this->estimateWordTimestamps($fullText, $clipStart, $clipEnd);
         }
 
-        // Filter hanya kata-kata yang masuk dalam rentang clip
-        $clipWords = array_filter($words, function ($w) use ($clipStart, $clipEnd) {
-            return $w['start'] >= $clipStart && $w['end'] <= $clipEnd;
-        });
+        $clipDuration = max(0, $clipEnd - $clipStart);
 
-        // Normalisasi waktu: ubah ke relatif dari awal clip (0-based)
-        $normalizedWords = array_map(function ($w) use ($clipStart) {
+        $normalized = array_map(function ($w) use ($clipStart, $clipDuration) {
+
+            $start = max(0, $w['start'] - $clipStart);
+            $end   = max(0, $w['end'] - $clipStart);
+
+            if ($end > $clipDuration) $end = $clipDuration;
+            if ($end <= $start) $end = min($clipDuration, $start + 0.1);
+
             return [
-                'word'  => $w['word'],
-                'start' => round($w['start'] - $clipStart, 3),
-                'end'   => round($w['end'] - $clipStart, 3),
+                'word'  => $this->cleanWord($w['word']),
+                'start' => round($start, 3),
+                'end'   => round($end, 3),
             ];
-        }, array_values($clipWords));
 
-        // Jika setelah filter masih kosong (timestamps Gemini tidak akurat),
-        // fallback: estimasi ulang dari full_text dengan durasi clip
-        if (empty($normalizedWords)) {
-            Log::warning("CaptionService: tidak ada kata dalam rentang clip, fallback estimasi ulang.");
-            $clipDuration    = $clipEnd - $clipStart;
-            $normalizedWords = $this->estimateWordTimestamps($fullText, 0, $clipDuration);
-        }
+        }, $words);
 
-        $assContent = $this->buildAssContent($normalizedWords);
+        $assContent = $this->buildYoutubeKaraokeStyle($normalized);
 
-        file_put_contents($outputPath, $assContent);
+        file_put_contents($outputPath, mb_convert_encoding($assContent, 'UTF-8'));
 
-        Log::info("CaptionService: ASS file berhasil dibuat.", [
-            'path'       => $outputPath,
-            'word_count' => count($normalizedWords),
+        Log::info("ASS karaoke style berhasil dibuat.", [
+            'path' => $outputPath
         ]);
     }
 
     /**
-     * Estimasi timestamps per kata secara proporsional berdasarkan panjang kata.
-     * Lebih akurat dari pembagian rata karena kata panjang butuh waktu lebih.
+     * ==========================================
+     * BUILD YOUTUBE KARAOKE STYLE
+     * ==========================================
      */
-    private function estimateWordTimestamps(string $text, float $startTime, float $endTime): array
+    private function buildYoutubeKaraokeStyle(array $words): string
     {
-        // Bersihkan teks
-        $text  = preg_replace('/\s+/', ' ', trim($text));
-        $words = explode(' ', $text);
-        $words = array_filter($words, fn($w) => trim($w) !== '');
-        $words = array_values($words);
+        if (empty($words)) return '';
 
-        if (empty($words)) return [];
-
-        $duration       = $endTime - $startTime;
-        $totalCharCount = array_sum(array_map('mb_strlen', $words));
-
-        $result  = [];
-        $current = $startTime;
-
-        foreach ($words as $word) {
-            $proportion = mb_strlen($word) / max($totalCharCount, 1);
-            $wordDur    = $duration * $proportion;
-            // Minimum 0.1 detik per kata, maksimum 1.5 detik
-            $wordDur    = max(0.1, min(1.5, $wordDur));
-
-            $result[] = [
-                'word'  => $word,
-                'start' => round($current, 3),
-                'end'   => round($current + $wordDur, 3),
-            ];
-
-            $current += $wordDur;
-        }
-
-        return $result;
-    }
-
-    /**
-     * Build konten file .ASS dengan style per kata.
-     * Setiap kata muncul satu per satu di tengah layar:
-     * - Teks: putih, bold, besar
-     * - Background: kotak hitam semi-transparan di belakang kata
-     * - Muncul dan hilang sesuai durasi kata
-     */
-    private function buildAssContent(array $words): string
-    {
-        // =============================================
-        // HEADER ASS
-        // =============================================
-        // PrimaryColour  = warna teks utama (putih)
-        // SecondaryColour= warna highlight karaoke (kuning)
-        // OutlineColour  = warna outline/border teks (hitam)
-        // BackColour     = warna background box (hitam semi-transparan)
-        // BorderStyle=3  = background box per kata (bukan garis outline biasa)
-        // Alignment=5    = tengah-tengah layar (Middle Center)
         $header = <<<ASS
 [Script Info]
 ScriptType: v4.00+
@@ -126,58 +64,131 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: WordPop,Arial,72,&H00FFFFFF,&H0000FFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,2,0,3,8,0,5,20,20,0,1
+Style: YT,Arial,58,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,60,60,140,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 ASS;
 
-        // =============================================
-        // GENERATE: 1 dialogue per kata
-        // =============================================
+        $groups = $this->splitByDuration($words, 3.0);
+
         $dialogues = '';
 
-        foreach ($words as $w) {
-            $word = $this->cleanWord($w['word']);
-            if ($word === '') continue;
+        foreach ($groups as $group) {
 
-            $start = $this->toAssTime($w['start']);
-            $end   = $this->toAssTime($w['end']);
+            $start = $this->toAssTime($group[0]['start']);
+            $end   = $this->toAssTime(end($group)['end']);
 
-            // {\an5} = anchor tengah layar (override alignment ke center-middle)
-            // {\fad(80,80)} = fade in 80ms, fade out 80ms supaya tidak abrupt
-            // {\b1} = bold
-            $text = "{\\an5}{\\fad(80,80)}{\\b1}" . $word;
+            $karaokeText = '';
+            $sentenceWords = array_column($group, 'word');
 
-            $dialogues .= "Dialogue: 0,{$start},{$end},WordPop,,0,0,0,,{$text}\n";
+            // Balanced 2 line split
+            $lines = $this->splitBalancedLines($sentenceWords);
+
+            foreach ($lines as $lineIndex => $lineWords) {
+
+                foreach ($lineWords as $index => $word) {
+
+                    $wordData = $group[array_search($word, $sentenceWords)];
+                    $duration = ($wordData['end'] - $wordData['start']);
+                    $centiseconds = max(1, (int)round($duration * 100));
+
+                    $karaokeText .= "{\\k{$centiseconds}}" . $word . " ";
+                }
+
+                if ($lineIndex === 0 && count($lines) > 1) {
+                    $karaokeText .= "\\N";
+                }
+            }
+
+            $dialogues .= "Dialogue: 0,{$start},{$end},YT,,0,0,0,,{$karaokeText}\n";
         }
 
         return $header . $dialogues;
     }
 
     /**
-     * Format detik ke format ASS time: H:MM:SS.CC
+     * Split per durasi (3 detik)
      */
+    private function splitByDuration(array $words, float $maxSeconds): array
+    {
+        $groups = [];
+        $current = [];
+        $startTime = $words[0]['start'];
+
+        foreach ($words as $word) {
+
+            if (empty($current)) {
+                $startTime = $word['start'];
+            }
+
+            $current[] = $word;
+
+            if (($word['end'] - $startTime) >= $maxSeconds) {
+                $groups[] = $current;
+                $current = [];
+            }
+        }
+
+        if (!empty($current)) {
+            $groups[] = $current;
+        }
+
+        return $groups;
+    }
+
+    /**
+     * Split jadi 2 baris seimbang
+     */
+    private function splitBalancedLines(array $words): array
+    {
+        if (count($words) <= 6) {
+            return [$words];
+        }
+
+        $mid = floor(count($words) / 2);
+
+        return [
+            array_slice($words, 0, $mid),
+            array_slice($words, $mid)
+        ];
+    }
+
+    
+    private function estimateWordTimestamps(string $text, float $start, float $end): array
+    {
+        $words = explode(' ', trim(preg_replace('/\s+/', ' ', $text)));
+        $duration = max(0.1, $end - $start);
+        $perWord = $duration / max(count($words), 1);
+
+        $current = $start;
+        $result = [];
+
+        foreach ($words as $word) {
+            $result[] = [
+                'word'  => $this->cleanWord($word),
+                'start' => $current,
+                'end'   => $current + $perWord,
+            ];
+            $current += $perWord;
+        }
+
+        return $result;
+    }
+
     private function toAssTime(float $seconds): string
     {
-        $h  = (int) ($seconds / 3600);
-        $m  = (int) (($seconds % 3600) / 60);
-        $s  = (int) ($seconds % 60);
-        $cs = (int) round(fmod($seconds, 1) * 100);
+        $h = floor($seconds / 3600);
+        $m = floor(($seconds % 3600) / 60);
+        $s = floor($seconds % 60);
+        $cs = floor(($seconds - floor($seconds)) * 100);
 
         return sprintf('%d:%02d:%02d.%02d', $h, $m, $s, $cs);
     }
 
-    /**
-     * Bersihkan kata dari karakter yang bisa break ASS format.
-     */
     private function cleanWord(string $word): string
     {
-        // Hapus karakter yang bisa break ASS: { } \
-        $word = str_replace(['{', '}', '\\'], '', $word);
-        // Hapus emoji
-        $word = preg_replace('/[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x{1F680}-\x{1F6FF}\x{2600}-\x{26FF}\x{2700}-\x{27BF}]/u', '', $word);
-        return trim($word);
+        return trim(str_replace(['{','}','\\'], '', $word));
     }
 }
