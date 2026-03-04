@@ -26,7 +26,7 @@ class AIHighlightService
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$this->model}:generateContent?key={$this->apiKey}";
 
         // Logika Prompt: Jika ada query, instruksikan AI mencari momen spesifik
-        $instruction = $query 
+        $instruction = $query
             ? "Find segments in this transcript specifically about: '{$query}'."
             : "Identify 3 to 5 most engaging or viral segments for TikTok/Reels.";
 

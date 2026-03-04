@@ -57,4 +57,3 @@ class User extends Authenticatable
         return $this->hasMany(Video::class); //[cite: 198]
     }
 }
-

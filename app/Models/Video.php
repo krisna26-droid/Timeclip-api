@@ -9,11 +9,11 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Video extends Model
 {
     protected $fillable = [
-        'user_id', 
-        'title', 
-        'source_url', 
-        'file_path', 
-        'duration', 
+        'user_id',
+        'title',
+        'source_url',
+        'file_path',
+        'duration',
         'status'
     ];
 

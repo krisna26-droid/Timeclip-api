@@ -75,13 +75,12 @@ class ProcessVideoClipJob implements ShouldQueue
             $fullText = $transcription->full_text ?? '';
 
             $captionService->generateAss(
-                words:      $words,
-                fullText:   $fullText,
-                clipStart:  (float) $this->clip->start_time,
-                clipEnd:    (float) $this->clip->end_time,
+                words: $words,
+                fullText: $fullText,
+                clipStart: (float) $this->clip->start_time,
+                clipEnd: (float) $this->clip->end_time,
                 outputPath: $assPath
             );
-
         } catch (\Throwable $e) {
             // Jika caption gagal, tetap render video tapi tanpa subtitle
             Log::warning("Caption generation gagal, render tanpa subtitle: " . $e->getMessage(), [
@@ -111,19 +110,32 @@ class ProcessVideoClipJob implements ShouldQueue
         }
 
         $command = [
-            'ffmpeg', '-y',
-            '-ss', (string) $this->clip->start_time,
-            '-t',  (string) $duration,
-            '-i',  $videoInputPath,
-            '-vf', $vfFilter,
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-crf', '23',
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-map', '0:v:0',
-            '-map', '0:a:0',
-            '-movflags', '+faststart',
+            'ffmpeg',
+            '-y',
+            '-ss',
+            (string) $this->clip->start_time,
+            '-t',
+            (string) $duration,
+            '-i',
+            $videoInputPath,
+            '-vf',
+            $vfFilter,
+            '-c:v',
+            'libx264',
+            '-preset',
+            'fast',
+            '-crf',
+            '23',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '128k',
+            '-map',
+            '0:v:0',
+            '-map',
+            '0:a:0',
+            '-movflags',
+            '+faststart',
             $outputPath
         ];
 

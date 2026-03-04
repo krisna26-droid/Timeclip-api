@@ -19,9 +19,20 @@ class CaptionService
             $words = $this->estimateWordTimestamps($fullText, $clipStart, $clipEnd);
         }
 
+        if (empty($words)) {
+            Log::warning("Tidak ada words untuk dibuat ASS.");
+            return;
+        }
+
         $clipDuration = max(0, $clipEnd - $clipStart);
 
-        $normalized = array_map(function ($w) use ($clipStart, $clipDuration) {
+        $normalized = [];
+
+        foreach ($words as $w) {
+
+            if (!isset($w['start'], $w['end'], $w['word'])) {
+                continue;
+            }
 
             $start = max(0, $w['start'] - $clipStart);
             $end   = max(0, $w['end'] - $clipStart);
@@ -29,26 +40,33 @@ class CaptionService
             if ($end > $clipDuration) $end = $clipDuration;
             if ($end <= $start) $end = min($clipDuration, $start + 0.1);
 
-            return [
+            $normalized[] = [
                 'word'  => $this->cleanWord($w['word']),
                 'start' => round($start, 3),
                 'end'   => round($end, 3),
             ];
+        }
 
-        }, $words);
+        if (empty($normalized)) {
+            Log::warning("Normalized words kosong.");
+            return;
+        }
 
         $assContent = $this->buildYoutubeKaraokeStyle($normalized);
 
-        file_put_contents($outputPath, mb_convert_encoding($assContent, 'UTF-8'));
+        file_put_contents(
+            $outputPath,
+            mb_convert_encoding($assContent, 'UTF-8')
+        );
 
-        Log::info("ASS karaoke style berhasil dibuat.", [
+        Log::info("ASS karaoke berhasil dibuat.", [
             'path' => $outputPath
         ]);
     }
 
     /**
      * ==========================================
-     * BUILD YOUTUBE KARAOKE STYLE
+     * BUILD YOUTUBE KARAOKE STYLE (FIXED)
      * ==========================================
      */
     private function buildYoutubeKaraokeStyle(array $words): string
@@ -77,29 +95,31 @@ ASS;
 
         foreach ($groups as $group) {
 
+            if (empty($group)) continue;
+
             $start = $this->toAssTime($group[0]['start']);
             $end   = $this->toAssTime(end($group)['end']);
 
             $karaokeText = '';
-            $sentenceWords = array_column($group, 'word');
+            $lines = $this->splitBalancedLines($group);
 
-            // Balanced 2 line split
-            $lines = $this->splitBalancedLines($sentenceWords);
+            $offset = 0;
 
             foreach ($lines as $lineIndex => $lineWords) {
 
-                foreach ($lineWords as $index => $word) {
+                foreach ($lineWords as $i => $wordData) {
 
-                    $wordData = $group[array_search($word, $sentenceWords)];
-                    $duration = ($wordData['end'] - $wordData['start']);
-                    $centiseconds = max(1, (int)round($duration * 100));
+                    $duration = $wordData['end'] - $wordData['start'];
+                    $centiseconds = max(1, (int) round($duration * 100));
 
-                    $karaokeText .= "{\\k{$centiseconds}}" . $word . " ";
+                    $karaokeText .= "{\\k{$centiseconds}}" . $wordData['word'] . " ";
                 }
 
                 if ($lineIndex === 0 && count($lines) > 1) {
                     $karaokeText .= "\\N";
                 }
+
+                $offset += count($lineWords);
             }
 
             $dialogues .= "Dialogue: 0,{$start},{$end},YT,,0,0,0,,{$karaokeText}\n";
@@ -109,10 +129,12 @@ ASS;
     }
 
     /**
-     * Split per durasi (3 detik)
+     * Split group max 3 detik
      */
     private function splitByDuration(array $words, float $maxSeconds): array
     {
+        if (empty($words)) return [];
+
         $groups = [];
         $current = [];
         $startTime = $words[0]['start'];
@@ -141,26 +163,30 @@ ASS;
     /**
      * Split jadi 2 baris seimbang
      */
-    private function splitBalancedLines(array $words): array
+    private function splitBalancedLines(array $group): array
     {
-        if (count($words) <= 6) {
-            return [$words];
+        $count = count($group);
+
+        if ($count <= 6) {
+            return [$group];
         }
 
-        $mid = floor(count($words) / 2);
+        $mid = floor($count / 2);
 
         return [
-            array_slice($words, 0, $mid),
-            array_slice($words, $mid)
+            array_slice($group, 0, $mid),
+            array_slice($group, $mid)
         ];
     }
 
-    
     private function estimateWordTimestamps(string $text, float $start, float $end): array
     {
         $words = explode(' ', trim(preg_replace('/\s+/', ' ', $text)));
+
+        if (empty($words)) return [];
+
         $duration = max(0.1, $end - $start);
-        $perWord = $duration / max(count($words), 1);
+        $perWord = $duration / count($words);
 
         $current = $start;
         $result = [];
@@ -182,13 +208,20 @@ ASS;
         $h = floor($seconds / 3600);
         $m = floor(($seconds % 3600) / 60);
         $s = floor($seconds % 60);
-        $cs = floor(($seconds - floor($seconds)) * 100);
+
+        $fraction = $seconds - floor($seconds);
+        $cs = (int) round($fraction * 100);
+
+        if ($cs === 100) {
+            $cs = 0;
+            $s++;
+        }
 
         return sprintf('%d:%02d:%02d.%02d', $h, $m, $s, $cs);
     }
 
     private function cleanWord(string $word): string
     {
-        return trim(str_replace(['{','}','\\'], '', $word));
+        return trim(str_replace(['{', '}', '\\'], '', $word));
     }
 }

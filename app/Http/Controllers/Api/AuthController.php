@@ -78,7 +78,7 @@ class AuthController extends Controller
     {
         /** @var GithubProvider $driver */
         $driver = Socialite::driver('github');
-        
+
         return $driver->stateless()->redirect();
     }
 
@@ -90,7 +90,7 @@ class AuthController extends Controller
         try {
             /** @var GithubProvider $driver */
             $driver = Socialite::driver('github');
-            
+
             $githubUser = $driver->stateless()->user();
 
             $user = User::updateOrCreate([
@@ -99,7 +99,7 @@ class AuthController extends Controller
                 'name' => $githubUser->getName() ?? $githubUser->getNickname(),
                 'provider_id' => $githubUser->getId(),
                 'provider_name' => 'github',
-                'password' => null, 
+                'password' => null,
                 'role' => 'creator',
                 'tier' => 'free',
                 'remaining_credits' => 10,
@@ -115,7 +115,6 @@ class AuthController extends Controller
                 'token_type' => 'Bearer',
                 'user' => $user
             ]);
-
         } catch (Exception $e) {
             return response()->json([
                 'status' => 'error',

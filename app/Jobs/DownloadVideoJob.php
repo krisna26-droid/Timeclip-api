@@ -41,9 +41,12 @@ class DownloadVideoJob implements ShouldQueue
 
         $process = new Process([
             $ytDlpPath,
-            '-f', 'bestvideo[height<=720]+bestaudio/best',
-            '--merge-output-format', 'mp4',
-            '-o', $outputPath,
+            '-f',
+            'bestvideo[height<=720]+bestaudio/best',
+            '--merge-output-format',
+            'mp4',
+            '-o',
+            $outputPath,
             $this->video->source_url
         ]);
 
@@ -60,11 +63,9 @@ class DownloadVideoJob implements ShouldQueue
 
                 // FIX: Import sudah ditambahkan, dispatch ke transcription
                 ProcessTranscription::dispatch($this->video);
-
             } else {
                 throw new \Exception("File tidak ditemukan setelah download.");
             }
-
         } catch (\Exception $e) {
             Log::error("Download Failed ID {$this->video->id}: " . $e->getMessage());
             $this->video->update(['status' => 'failed']);

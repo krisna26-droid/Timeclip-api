@@ -8,6 +8,7 @@ use App\Models\Video;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
 use App\Jobs\DownloadVideoJob;
+use App\Models\Clip;
 
 class VideoController extends Controller
 {
@@ -59,7 +60,7 @@ class VideoController extends Controller
         $video = Video::create([
             'user_id'   => $user->id,
             'title'     => $request->title,
-            'source_url'=> $request->url,
+            'source_url' => $request->url,
             'duration'  => $request->duration,
             'status'    => 'pending',
         ]);
@@ -81,5 +82,30 @@ class VideoController extends Controller
             'message' => 'Video masuk antrean.',
             'data'    => $video
         ], 201);
+    }
+
+    public function dashboardStats()
+    {
+        $user = Auth::user();
+
+        // Hitung ringkasan video berdasarkan status
+        $stats = [
+            'total_videos'     => $user->videos()->count(),
+            'processing_now'   => $user->videos()->whereIn('status', ['pending', 'processing'])->count(),
+            'completed_videos' => $user->videos()->where('status', 'completed')->count(),
+            'total_clips'      => Clip::whereHas('video', function ($q) use ($user) {
+                $q->where('user_id', $user->id);
+            })->count(),
+        ];
+
+        return response()->json([
+            'status' => 'success',
+            'user'   => [
+                'name'              => $user->name,
+                'tier'              => $user->tier, //
+                'remaining_credits' => $user->remaining_credits, //
+            ],
+            'stats'  => $stats
+        ]);
     }
 }

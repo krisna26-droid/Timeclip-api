@@ -12,8 +12,56 @@ use Illuminate\Support\Facades\Auth;
 class ClipController extends Controller
 {
     /**
+     * TAHAP 12: Clip Output & Preview Gallery
+     * Memperbaiki logic agar data muncul di Postman sesuai kepemilikan user.
+     */
+    public function gallery()
+    {
+        $user = Auth::user();
+
+        // Fix: Query harus memuat 'user_id' agar filter ownership tidak null
+        $clips = Clip::whereHas('video', function ($query) use ($user) {
+            $query->where('user_id', $user->id);
+        })
+            ->where('status', 'ready') //
+            ->with(['video' => function ($q) {
+                $q->select('id', 'user_id', 'title'); // WAJIB ada user_id di sini
+            }])
+            ->orderBy('viral_score', 'desc')
+            ->paginate(12);
+
+        // Memberikan response yang informatif jika data memang belum ada
+        if ($clips->isEmpty()) {
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Belum ada klip yang siap (status ready) untuk User ID: ' . $user->id,
+                'data' => []
+            ], 200);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'data' => $clips->getCollection()->map(function ($clip) {
+                return [
+                    'id' => $clip->id,
+                    'title' => $clip->title,
+                    'viral_score' => $clip->viral_score,
+                    'duration' => round($clip->end_time - $clip->start_time, 2),
+                    'video_title' => $clip->video->title ?? 'Untitled Video',
+                    'clip_url' => $clip->clip_path ? asset('storage/' . $clip->clip_path) : null,
+                    'created_at' => $clip->created_at->diffForHumans(),
+                ];
+            }),
+            'meta' => [
+                'current_page' => $clips->currentPage(),
+                'last_page' => $clips->lastPage(),
+                'total' => $clips->total(),
+            ]
+        ]);
+    }
+
+    /**
      * TAHAP 7: Ask AI Agent
-     * Mencari momen spesifik berdasarkan query user.
      */
     public function askAI(Request $request, $videoId, AIHighlightService $aiService)
     {
@@ -21,7 +69,6 @@ class ClipController extends Controller
             'query' => 'required|string|min:3'
         ]);
 
-        // 1. Verifikasi akses video
         $video = Video::where('id', $videoId)
             ->where('user_id', Auth::id())
             ->first();
@@ -33,17 +80,15 @@ class ClipController extends Controller
             ], 404);
         }
 
-        // 2. Minta AI mencari momen berdasarkan query
         $results = $aiService->getHighlights((string) $video->transcription->full_text, $request->get('query'));
 
         if (empty($results)) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'AI tidak menemukan momen yang sesuai dengan permintaan Anda.'
+                'message' => 'AI tidak menemukan momen yang sesuai.'
             ], 422);
         }
 
-        // 3. Simpan hasil sebagai klip baru
         $newClips = [];
         foreach ($results as $item) {
             $newClips[] = Clip::create([
@@ -52,19 +97,19 @@ class ClipController extends Controller
                 'start_time'  => $item['start_time'],
                 'end_time'    => $item['end_time'],
                 'viral_score' => $item['viral_score'],
-                'status'      => 'rendering', // Siap dipotong FFmpeg di tahap 8
+                'status'      => 'rendering',
             ]);
         }
 
         return response()->json([
             'status' => 'success',
-            'message' => count($newClips) . ' momen baru ditemukan oleh AI Agent.',
+            'message' => count($newClips) . ' momen baru ditemukan.',
             'data' => $newClips
         ]);
     }
 
     /**
-     * Menampilkan semua klip berdasarkan video_id tertentu.
+     * Mengambil semua klip dari satu video spesifik
      */
     public function index($videoId)
     {
@@ -75,7 +120,7 @@ class ClipController extends Controller
         if (!$video) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Video tidak ditemukan atau Anda tidak memiliki akses.'
+                'message' => 'Video tidak ditemukan.'
             ], 404);
         }
 
@@ -84,34 +129,40 @@ class ClipController extends Controller
         return response()->json([
             'status' => 'success',
             'video_title' => $video->title,
-            'data' => $clips
+            'data' => $clips->map(fn($c) => [
+                'id' => $c->id,
+                'title' => $c->title,
+                'viral_score' => $c->viral_score,
+                'status' => $c->status,
+                'clip_url' => $c->clip_path ? asset('storage/' . $c->clip_path) : null,
+            ])
         ]);
     }
 
     /**
-     * Menampilkan detail satu klip spesifik.
+     * Menampilkan detail satu klip spesifik
      */
     public function show($id)
     {
-        $clip = Clip::with('video')->find($id);
+        // Fix eager loading select
+        $clip = Clip::with('video:id,user_id,title')->find($id);
 
-        if (!$clip) {
+        if (!$clip || $clip->video->user_id !== Auth::id()) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Klip tidak ditemukan.'
+                'message' => 'Klip tidak ditemukan atau akses ditolak.'
             ], 404);
-        }
-
-        if ($clip->video->user_id !== Auth::id()) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Anda tidak memiliki akses ke klip ini.'
-            ], 403);
         }
 
         return response()->json([
             'status' => 'success',
-            'data' => $clip
+            'data' => [
+                'id' => $clip->id,
+                'title' => $clip->title,
+                'viral_score' => $clip->viral_score,
+                'clip_url' => asset('storage/' . $clip->clip_path),
+                'parent_video' => $clip->video->title
+            ]
         ]);
     }
 }

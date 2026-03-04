@@ -52,11 +52,15 @@ class ProcessTranscription implements ShouldQueue
         try {
             // FIX: Pakai array process, bukan string interpolasi (hindari injection risk)
             $process = new Process([
-                'ffmpeg', '-y',
-                '-i', $videoPath,
+                'ffmpeg',
+                '-y',
+                '-i',
+                $videoPath,
                 '-vn',
-                '-acodec', 'libmp3lame',
-                '-q:a', '2',
+                '-acodec',
+                'libmp3lame',
+                '-q:a',
+                '2',
                 $audioPath
             ]);
             $process->setTimeout(600);
