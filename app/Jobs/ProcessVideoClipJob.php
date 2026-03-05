@@ -28,29 +28,31 @@ class ProcessVideoClipJob implements ShouldQueue
 
     public function handle(CaptionService $captionService)
     {
-        Log::info("=== STARTING FFmpeg RENDER (WITH KARAOKE CAPTION) ===", ['clip_id' => $this->clip->id]);
+        Log::info("=== STARTING FFmpeg RENDER (FIXED PATH & EXT) ===", ['clip_id' => $this->clip->id]);
 
         $video = $this->clip->video;
 
-        $videoInputPath = storage_path('app/private/raw_videos/' . $video->id . '.mp4');
+        // FIX 1: Gunakan file_path dinamis dari database (Solusi FE Poin 1)
+        // Jangan hardcode .mp4 karena hasil download bisa jadi .mkv atau .webm
+        $videoInputPath = storage_path('app/' . $video->file_path);
 
         // Validasi file input ada
         if (!File::exists($videoInputPath)) {
-            Log::error("Video input tidak ditemukan: " . $videoInputPath, ['clip_id' => $this->clip->id]);
+            Log::error("Video input tidak ditemukan di private storage: " . $videoInputPath, ['clip_id' => $this->clip->id]);
             $this->clip->update(['status' => 'failed']);
             return;
         }
 
-        // Setup output
+        // FIX 2: Pastikan folder output PUBLIC/CLIPS tersedia (Solusi FE Poin 2)
         $outputDir = storage_path('app/public/clips');
         if (!File::exists($outputDir)) {
             File::makeDirectory($outputDir, 0755, true);
         }
 
         $outputFileName = 'clip_' . $this->clip->id . '.mp4';
-        $outputPath     = $outputDir . '/' . $outputFileName;
+        $outputPath     = $outputDir . DIRECTORY_SEPARATOR . $outputFileName;
 
-        // Setup temp ASS subtitle file
+        // FIX 2: Pastikan folder CAPTIONS tersedia di private storage
         $assPath = storage_path('app/private/captions/clip_' . $this->clip->id . '.ass');
         $assDir  = dirname($assPath);
         if (!File::exists($assDir)) {
@@ -69,7 +71,7 @@ class ProcessVideoClipJob implements ShouldQueue
         // STEP 1: Generate file ASS dari CaptionService
         // =============================================
         try {
-            $transcription = $video->transcription; // relasi: Video hasOne Transcription
+            $transcription = $video->transcription;
 
             $words    = $transcription->json_data['words'] ?? [];
             $fullText = $transcription->full_text ?? '';
@@ -82,7 +84,6 @@ class ProcessVideoClipJob implements ShouldQueue
                 outputPath: $assPath
             );
         } catch (\Throwable $e) {
-            // Jika caption gagal, tetap render video tapi tanpa subtitle
             Log::warning("Caption generation gagal, render tanpa subtitle: " . $e->getMessage(), [
                 'clip_id' => $this->clip->id
             ]);
@@ -90,27 +91,28 @@ class ProcessVideoClipJob implements ShouldQueue
         }
 
         // =============================================
-        // STEP 2: FFmpeg render dengan atau tanpa subtitle
+        // STEP 2: FFmpeg render dengan Full Path Binary
         // =============================================
+
+        // FIX 3: Path FFmpeg Absolut (Solusi FE Poin 3)
+        $ffmpegPath = PHP_OS_FAMILY === 'Windows'
+            ? 'C:\ffmpeg\bin\ffmpeg.exe'
+            : 'ffmpeg';
 
         // Crop portrait 9:16
         $cropFilter = "scale=-1:1080,crop=608:1080:(in_w-608)/2:0";
 
         if ($assPath && File::exists($assPath)) {
-            // Escape path untuk FFmpeg subtitles filter (Windows & Linux safe)
             $assEscaped = $this->escapeAssPath($assPath);
-
-            // Filter: crop dulu, lalu burn subtitle karaoke
             $vfFilter = "{$cropFilter},ass='{$assEscaped}'";
-
             Log::info("Render dengan karaoke subtitle.", ['ass' => $assPath]);
         } else {
             $vfFilter = $cropFilter;
-            Log::info("Render tanpa subtitle (caption tidak tersedia).");
+            Log::info("Render tanpa subtitle.");
         }
 
         $command = [
-            'ffmpeg',
+            $ffmpegPath, // Pakai Full Path
             '-y',
             '-ss',
             (string) $this->clip->start_time,
@@ -143,16 +145,12 @@ class ProcessVideoClipJob implements ShouldQueue
         $process->setTimeout(1200);
         $process->run();
 
-        // =============================================
-        // STEP 3: Cleanup temp ASS file
-        // =============================================
+        // Cleanup temp ASS
         if ($assPath && File::exists($assPath)) {
             File::delete($assPath);
         }
 
-        // =============================================
-        // STEP 4: Update status clip
-        // =============================================
+        // UPDATE STATUS
         if ($process->isSuccessful()) {
             $this->clip->update([
                 'status'    => 'ready',
@@ -165,10 +163,6 @@ class ProcessVideoClipJob implements ShouldQueue
         }
     }
 
-    /**
-     * Escape path ASS untuk FFmpeg ass filter.
-     * Windows: D:\path\file.ass → D\:/path/file.ass
-     */
     private function escapeAssPath(string $path): string
     {
         $path = str_replace('\\', '/', $path);
