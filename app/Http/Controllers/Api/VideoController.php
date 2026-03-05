@@ -108,4 +108,20 @@ class VideoController extends Controller
             'stats'  => $stats
         ]);
     }
+    public function show($id)
+    {
+        $video = Auth::user()->videos()->find($id);
+
+        if (!$video) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Video tidak ditemukan.'
+            ], 404);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'data'   => $video
+        ]);
+    }
 }
