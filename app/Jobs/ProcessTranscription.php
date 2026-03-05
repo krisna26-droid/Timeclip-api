@@ -33,29 +33,25 @@ class ProcessTranscription implements ShouldQueue
 
         $this->video->update(['status' => 'processing']);
 
-        // 1. Ambil path asli dari database (hasil globbing di Job sebelumnya)
         $videoPath = storage_path('app/' . $this->video->file_path);
         $audioDir  = storage_path('app/private/audio');
         $audioPath = $audioDir . DIRECTORY_SEPARATOR . $this->video->id . '.mp3';
 
-        // 2. FIX: Pastikan folder audio ada dengan permission yang benar (Solusi FE Poin 2)
+        // Pastikan folder audio ada
         if (!File::exists($audioDir)) {
             File::makeDirectory($audioDir, 0755, true);
         }
 
-        // 3. Validasi file input ada sebelum diproses
         if (!File::exists($videoPath)) {
-            Log::error("Video file tidak ditemukan: " . $videoPath);
+            Log::error("Video file tidak ditemukan: {$videoPath}", ['video_id' => $this->video->id]);
             $this->video->update(['status' => 'failed']);
             return;
         }
 
         try {
-            // 4. FIX: Gunakan Full Path FFmpeg agar tidak "Ghaib" di Queue (Solusi FE Poin 3)
-            // Sesuaikan path ini dengan lokasi instalasi di Windows Anda
-            $ffmpegPath = PHP_OS_FAMILY === 'Windows'
-                ? 'C:\ffmpeg\bin\ffmpeg.exe'
-                : 'ffmpeg';
+            // FIX: Gunakan helper terpusat untuk cari ffmpeg (sama logikanya dengan DownloadVideoJob)
+            $ffmpegPath = $this->resolveFfmpeg();
+            Log::info("Menggunakan ffmpeg: {$ffmpegPath}", ['video_id' => $this->video->id]);
 
             $process = new Process([
                 $ffmpegPath,
@@ -77,25 +73,18 @@ class ProcessTranscription implements ShouldQueue
                 throw new \Exception("FFmpeg ekstraksi audio gagal: " . $process->getErrorOutput());
             }
 
-            // 5. Verifikasi file audio hasil ekstraksi benar-benar tercipta
             if (!File::exists($audioPath)) {
                 throw new \Exception("File audio tidak tercipta setelah proses FFmpeg.");
             }
 
-            // 6. Jalankan Transkripsi AI
             $aiResult = $gemini->transcribe($audioPath);
 
-            // Simpan hasil ke database
             $transcription = Transcription::create([
                 'video_id'  => $this->video->id,
                 'full_text' => $aiResult['full_text'] ?? '',
                 'json_data' => $aiResult
             ]);
 
-            // Jangan update video jadi 'completed' di sini karena proses kliping belum mulai.
-            // Biarkan status tetap 'processing' agar Dashboard FE menunjukkan progres berjalan.
-
-            // 7. Lanjut ke highlight discovery
             DiscoverHighlightsJob::dispatch($this->video, $transcription);
 
             Log::info("=== TRANSCRIPTION SUCCESS & HIGHLIGHT DISPATCHED ===", ['video_id' => $this->video->id]);
@@ -103,11 +92,31 @@ class ProcessTranscription implements ShouldQueue
             Log::error("TRANSCRIPTION FAILED ID {$this->video->id}: " . $e->getMessage());
             $this->video->update(['status' => 'failed']);
 
-            // Bersihkan file audio yang mungkin corrupt
             if (File::exists($audioPath)) {
                 File::delete($audioPath);
             }
         }
+    }
+
+    private function resolveFfmpeg(): string
+    {
+        if ($envPath = env('FFMPEG_PATH')) {
+            return $envPath;
+        }
+
+        if (PHP_OS_FAMILY === 'Windows') {
+            $default = 'C:\\ffmpeg\\bin\\ffmpeg.exe';
+            if (File::exists($default)) return $default;
+        } else {
+            foreach (['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'] as $path) {
+                if (File::exists($path)) return $path;
+            }
+        }
+
+        $projectPath = base_path(PHP_OS_FAMILY === 'Windows' ? 'ffmpeg.exe' : 'ffmpeg');
+        if (File::exists($projectPath)) return $projectPath;
+
+        return 'ffmpeg'; // Fallback terakhir
     }
 
     public function failed(\Throwable $exception): void

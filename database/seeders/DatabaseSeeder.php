@@ -38,5 +38,18 @@ class DatabaseSeeder extends Seeder
         // 3. Buat 10 User Random (Default: Tier Free, Role Creator)
         // Pastikan UserFactory kamu sudah mendukung kolom baru ini atau biarkan default dari migration
         User::factory(10)->create();
+
+        foreach (
+            [
+                'private/raw_videos',
+                'private/audio',
+                'private/captions',
+                'public/clips',
+            ] as $dir
+        ) {
+            $path = storage_path('app/' . $dir);
+            if (!is_dir($path)) mkdir($path, 0755, true);
+            file_put_contents($path . '/.gitkeep', '');
+        }
     }
 }

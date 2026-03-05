@@ -27,70 +27,63 @@ class DownloadVideoJob implements ShouldQueue
 
     public function handle()
     {
-        // Set status awal
         $this->video->update(['status' => 'processing']);
 
-        // 1. Pastikan folder tujuan ada (Solusi FE Poin 2)
         $folderPath = storage_path('app/private/raw_videos');
         if (!File::exists($folderPath)) {
             File::makeDirectory($folderPath, 0755, true);
         }
 
-        // 2. Gunakan output template yt-dlp tanpa memaksa ekstensi di nama file (Solusi FE Poin 1)
-        // Kita gunakan %(ext)s agar yt-dlp bebas menentukan ekstensi terbaiknya
-        $outputTemplate = $folderPath . DIRECTORY_SEPARATOR . $this->video->id . '.%(ext)s';
+        // Paksa output .mp4 langsung — hindari %(ext)s yang rusak di Windows
+        $outputPath = $folderPath . DIRECTORY_SEPARATOR . $this->video->id . '.mp4';
 
-        // 3. Tentukan Path yt-dlp secara absolut (Solusi FE Poin 3)
-        // Jika file ada di root project, gunakan base_path. Jika di folder sistem, arahkan langsung.
-        $ytDlpPath = base_path(PHP_OS_FAMILY === 'Windows' ? 'yt-dlp.exe' : 'yt-dlp');
+        // Ambil path dari .env, fallback ke root project (karena yt-dlp.exe ada di sana)
+        $ytDlpPath  = env('YTDLP_PATH', base_path('yt-dlp.exe'));
+        $ffmpegPath = env('FFMPEG_PATH', 'C:\\ffmpeg\\bin\\ffmpeg.exe');
+        $ffmpegDir  = dirname($ffmpegPath); // yt-dlp butuh FOLDER-nya, bukan file-nya
 
-        // 4. Jalankan proses download
+        Log::info("Menggunakan yt-dlp: {$ytDlpPath}", ['video_id' => $this->video->id]);
+        Log::info("Menggunakan ffmpeg dir: {$ffmpegDir}", ['video_id' => $this->video->id]);
+
         $process = new Process([
             $ytDlpPath,
             '-f',
-            'bestvideo[height<=720]+bestaudio/best', // Ambil kualitas terbaik max 720p
+            'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
             '--merge-output-format',
-            'mp4', // Minta yt-dlp menggabungkan ke mp4 jika memungkinkan
+            'mp4',
+            '--ffmpeg-location',
+            $ffmpegDir,
+            '--no-playlist',
             '-o',
-            $outputTemplate,
+            $outputPath,
             $this->video->source_url
         ]);
 
         $process->setTimeout(3600);
 
         try {
-            $process->mustRun();
+            $process->mustRun(function ($type, $buffer) {
+                Log::debug("yt-dlp: " . trim($buffer));
+            });
 
-            // 5. Cari file yang benar-benar tercipta menggunakan glob (Solusi FE Poin 1)
-            // Ini akan mencari file seperti: 10.mp4, 10.mkv, atau 10.webm
-            $downloadedFiles = File::glob($folderPath . DIRECTORY_SEPARATOR . $this->video->id . '.*');
-
-            if (!empty($downloadedFiles)) {
-                // Ambil file pertama yang ditemukan
-                $actualFilePath = $downloadedFiles[0];
-                $actualFileName = basename($actualFilePath);
-
-                // Simpan path relatif yang benar ke database (bukan hardcoded .mp4)
+            if (File::exists($outputPath)) {
                 $this->video->update([
                     'status'    => 'completed',
-                    'file_path' => 'private/raw_videos/' . $actualFileName
+                    'file_path' => 'private/raw_videos/' . $this->video->id . '.mp4'
                 ]);
 
-                Log::info("Download Success ID {$this->video->id}: " . $actualFileName);
+                Log::info("Download Success ID {$this->video->id}", ['video_id' => $this->video->id]);
 
-                // Lanjut ke tahap berikutnya
                 ProcessTranscription::dispatch($this->video);
             } else {
-                throw new \Exception("File tidak ditemukan di folder tujuan setelah proses download selesai.");
+                throw new \Exception("File tidak ditemukan setelah download selesai.");
             }
         } catch (\Exception $e) {
             Log::error("Download Failed ID {$this->video->id}: " . $e->getMessage());
             $this->video->update(['status' => 'failed']);
 
-            // Cleanup jika ada file sisa yang corrupt
-            $residualFiles = File::glob($folderPath . DIRECTORY_SEPARATOR . $this->video->id . '.*');
-            foreach ($residualFiles as $file) {
-                File::delete($file);
+            if (File::exists($outputPath)) {
+                File::delete($outputPath);
             }
         }
     }
