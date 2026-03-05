@@ -19,7 +19,7 @@ class DiscoverHighlightsJob implements ShouldQueue
 
     public $video;
     public $transcription;
-    public $timeout = 300; // FIX: Tambah timeout karena AI bisa lambat
+    public $timeout = 300;
     public $tries = 2;
 
     public function __construct(Video $video, Transcription $transcription)
@@ -28,10 +28,6 @@ class DiscoverHighlightsJob implements ShouldQueue
         $this->transcription = $transcription;
     }
 
-    /**
-     * Mengubah format MM:SS atau angka menjadi detik (float).
-     * Mencegah error "Data truncated for column start_time/end_time".
-     */
     private function timeToSeconds($time): float
     {
         if (is_numeric($time)) {
@@ -43,7 +39,6 @@ class DiscoverHighlightsJob implements ShouldQueue
             return (float) ($parts[0] * 60) + (float) $parts[1];
         }
 
-        // Format HH:MM:SS
         if (count($parts) === 3) {
             return (float) ($parts[0] * 3600) + ($parts[1] * 60) + (float) $parts[2];
         }
@@ -59,6 +54,8 @@ class DiscoverHighlightsJob implements ShouldQueue
 
         if (empty($highlights)) {
             Log::warning("AI tidak menemukan highlight untuk video ID: " . $this->video->id);
+            // Tetap set completed agar FE tidak stuck loading selamanya
+            $this->video->update(['status' => 'completed']);
             return;
         }
 
@@ -66,7 +63,6 @@ class DiscoverHighlightsJob implements ShouldQueue
             $startTime = $this->timeToSeconds($item['start_time'] ?? 0);
             $endTime   = $this->timeToSeconds($item['end_time'] ?? 0);
 
-            // Skip clip yang durasinya tidak valid
             if ($endTime <= $startTime) {
                 Log::warning("Skipping invalid clip: start={$startTime} end={$endTime}");
                 continue;
@@ -84,11 +80,16 @@ class DiscoverHighlightsJob implements ShouldQueue
             ProcessVideoClipJob::dispatch($clip);
         }
 
+        // Update status video ke completed agar FE tidak stuck di 90%
+        $this->video->update(['status' => 'completed']);
+
         Log::info("Berhasil membuat " . count($highlights) . " rencana klip.", ['video_id' => $this->video->id]);
     }
 
     public function failed(\Throwable $exception): void
     {
         Log::error("DiscoverHighlightsJob permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
+        // Set failed agar FE tidak stuck loading juga
+        $this->video->update(['status' => 'failed']);
     }
 }
