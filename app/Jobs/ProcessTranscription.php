@@ -37,7 +37,6 @@ class ProcessTranscription implements ShouldQueue
         $audioDir  = storage_path('app/private/audio');
         $audioPath = $audioDir . DIRECTORY_SEPARATOR . $this->video->id . '.mp3';
 
-        // Pastikan folder audio ada
         if (!File::exists($audioDir)) {
             File::makeDirectory($audioDir, 0755, true);
         }
@@ -49,7 +48,6 @@ class ProcessTranscription implements ShouldQueue
         }
 
         try {
-            // FIX: Gunakan helper terpusat untuk cari ffmpeg (sama logikanya dengan DownloadVideoJob)
             $ffmpegPath = $this->resolveFfmpeg();
             Log::info("Menggunakan ffmpeg: {$ffmpegPath}", ['video_id' => $this->video->id]);
 
@@ -79,11 +77,29 @@ class ProcessTranscription implements ShouldQueue
 
             $aiResult = $gemini->transcribe($audioPath);
 
+            // Ambil full_text dan words yang sudah bersih dari GeminiService
+            $fullText = $aiResult['full_text'] ?? '';
+            $words    = $aiResult['words'] ?? [];
+
+            Log::info("Menyimpan transcription.", [
+                'video_id'   => $this->video->id,
+                'word_count' => count($words),
+                'text_preview' => substr($fullText, 0, 100),
+            ]);
+
             $transcription = Transcription::create([
                 'video_id'  => $this->video->id,
-                'full_text' => $aiResult['full_text'] ?? '',
-                'json_data' => $aiResult
+                'full_text' => $fullText,
+                'json_data' => [
+                    'full_text' => $fullText,
+                    'words'     => $words,
+                ],
             ]);
+
+            // Hapus file audio setelah selesai
+            if (File::exists($audioPath)) {
+                File::delete($audioPath);
+            }
 
             DiscoverHighlightsJob::dispatch($this->video, $transcription);
 
@@ -100,23 +116,7 @@ class ProcessTranscription implements ShouldQueue
 
     private function resolveFfmpeg(): string
     {
-        if ($envPath = env('FFMPEG_PATH')) {
-            return $envPath;
-        }
-
-        if (PHP_OS_FAMILY === 'Windows') {
-            $default = 'C:\\ffmpeg\\bin\\ffmpeg.exe';
-            if (File::exists($default)) return $default;
-        } else {
-            foreach (['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'] as $path) {
-                if (File::exists($path)) return $path;
-            }
-        }
-
-        $projectPath = base_path(PHP_OS_FAMILY === 'Windows' ? 'ffmpeg.exe' : 'ffmpeg');
-        if (File::exists($projectPath)) return $projectPath;
-
-        return 'ffmpeg'; // Fallback terakhir
+        return config('services.ffmpeg.path', env('FFMPEG_PATH', 'ffmpeg'));
     }
 
     public function failed(\Throwable $exception): void

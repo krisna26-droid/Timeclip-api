@@ -43,5 +43,9 @@ return [
         'client_secret' => env('GITHUB_CLIENT_SECRET'),
         'redirect' => env('GITHUB_REDIRECT_URI'),
     ],
+    'ffmpeg' => [
+        'path'        => env('FFMPEG_PATH', 'ffmpeg'),
+        'probe_path'  => env('FFPROBE_PATH', 'ffprobe'),
+    ],
 
 ];

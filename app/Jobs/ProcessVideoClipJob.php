@@ -39,13 +39,11 @@ class ProcessVideoClipJob implements ShouldQueue
             return;
         }
 
-        // Pastikan folder output ada
         $outputDir = storage_path('app/public/clips');
         if (!File::exists($outputDir)) {
             File::makeDirectory($outputDir, 0755, true);
         }
 
-        // Pastikan folder thumbnail ada
         $thumbDir = storage_path('app/public/thumbnails');
         if (!File::exists($thumbDir)) {
             File::makeDirectory($thumbDir, 0755, true);
@@ -56,7 +54,6 @@ class ProcessVideoClipJob implements ShouldQueue
         $thumbFileName  = 'thumb_' . $this->clip->id . '.jpg';
         $thumbPath      = $thumbDir . DIRECTORY_SEPARATOR . $thumbFileName;
 
-        // Pastikan folder captions ada
         $assPath = storage_path('app/private/captions/clip_' . $this->clip->id . '.ass');
         $assDir  = dirname($assPath);
         if (!File::exists($assDir)) {
@@ -75,7 +72,17 @@ class ProcessVideoClipJob implements ShouldQueue
         try {
             $transcription = $video->transcription;
             $words         = $transcription->json_data['words'] ?? [];
-            $fullText      = $transcription->full_text ?? '';
+
+            // Prioritas ambil full_text dari kolom langsung (sudah plain text)
+            // Fallback ke json_data['full_text'] jika kolom kosong
+            $fullText = $transcription->full_text ?? '';
+            if (empty($fullText)) {
+                $fullText = $transcription->json_data['full_text'] ?? '';
+            }
+
+            Log::info("Caption: words=" . count($words) . ", text_len=" . strlen($fullText), [
+                'clip_id' => $this->clip->id
+            ]);
 
             $captionService->generateAss(
                 words: $words,
@@ -85,7 +92,7 @@ class ProcessVideoClipJob implements ShouldQueue
                 outputPath: $assPath
             );
         } catch (\Throwable $e) {
-            Log::warning("Caption generation gagal, render tanpa subtitle: " . $e->getMessage(), ['clip_id' => $this->clip->id]);
+            Log::warning("Caption generation gagal: " . $e->getMessage(), ['clip_id' => $this->clip->id]);
             $assPath = null;
         }
 
@@ -151,10 +158,9 @@ class ProcessVideoClipJob implements ShouldQueue
 
         Log::info("Render Success: {$outputPath}", ['clip_id' => $this->clip->id]);
 
-        // STEP 3: Generate thumbnail dari frame tengah klip
+        // STEP 3: Generate thumbnail
         $thumbnailPath = null;
         try {
-            // Ambil frame di detik ke-3 klip (atau tengah kalau durasi pendek)
             $frameAt = min(3, $duration / 2);
 
             $thumbProcess = new Process([
@@ -165,11 +171,11 @@ class ProcessVideoClipJob implements ShouldQueue
                 '-i',
                 $videoInputPath,
                 '-vframes',
-                '1',                          // Ambil 1 frame saja
+                '1',
                 '-vf',
-                $cropFilter,                       // Sama crop portrait seperti klip
+                $cropFilter,
                 '-q:v',
-                '2',                              // Kualitas JPEG (1=terbaik, 31=terburuk)
+                '2',
                 $thumbPath
             ]);
 
