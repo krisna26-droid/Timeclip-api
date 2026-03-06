@@ -45,6 +45,7 @@ class DatabaseSeeder extends Seeder
                 'private/audio',
                 'private/captions',
                 'public/clips',
+                'public/thumbnails'
             ] as $dir
         ) {
             $path = storage_path('app/' . $dir);

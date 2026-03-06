@@ -30,8 +30,7 @@ class ProcessVideoClipJob implements ShouldQueue
     {
         Log::info("=== STARTING FFmpeg RENDER ===", ['clip_id' => $this->clip->id]);
 
-        $video = $this->clip->video;
-
+        $video          = $this->clip->video;
         $videoInputPath = storage_path('app/' . $video->file_path);
 
         if (!File::exists($videoInputPath)) {
@@ -40,14 +39,22 @@ class ProcessVideoClipJob implements ShouldQueue
             return;
         }
 
-        // Pastikan folder output public/clips ada
+        // Pastikan folder output ada
         $outputDir = storage_path('app/public/clips');
         if (!File::exists($outputDir)) {
             File::makeDirectory($outputDir, 0755, true);
         }
 
+        // Pastikan folder thumbnail ada
+        $thumbDir = storage_path('app/public/thumbnails');
+        if (!File::exists($thumbDir)) {
+            File::makeDirectory($thumbDir, 0755, true);
+        }
+
         $outputFileName = 'clip_' . $this->clip->id . '.mp4';
         $outputPath     = $outputDir . DIRECTORY_SEPARATOR . $outputFileName;
+        $thumbFileName  = 'thumb_' . $this->clip->id . '.jpg';
+        $thumbPath      = $thumbDir . DIRECTORY_SEPARATOR . $thumbFileName;
 
         // Pastikan folder captions ada
         $assPath = storage_path('app/private/captions/clip_' . $this->clip->id . '.ass');
@@ -67,8 +74,8 @@ class ProcessVideoClipJob implements ShouldQueue
         // STEP 1: Generate ASS subtitle
         try {
             $transcription = $video->transcription;
-            $words    = $transcription->json_data['words'] ?? [];
-            $fullText = $transcription->full_text ?? '';
+            $words         = $transcription->json_data['words'] ?? [];
+            $fullText      = $transcription->full_text ?? '';
 
             $captionService->generateAss(
                 words: $words,
@@ -82,8 +89,7 @@ class ProcessVideoClipJob implements ShouldQueue
             $assPath = null;
         }
 
-        // STEP 2: FFmpeg render
-        // FIX: Gunakan helper terpusat sama seperti Job lain
+        // STEP 2: FFmpeg render klip
         $ffmpegPath = $this->resolveFfmpeg();
         Log::info("Menggunakan ffmpeg: {$ffmpegPath}", ['clip_id' => $this->clip->id]);
 
@@ -91,7 +97,7 @@ class ProcessVideoClipJob implements ShouldQueue
 
         if ($assPath && File::exists($assPath)) {
             $assEscaped = $this->escapeAssPath($assPath);
-            $vfFilter = "{$cropFilter},ass='{$assEscaped}'";
+            $vfFilter   = "{$cropFilter},ass='{$assEscaped}'";
             Log::info("Render dengan subtitle.", ['clip_id' => $this->clip->id]);
         } else {
             $vfFilter = $cropFilter;
@@ -137,16 +143,55 @@ class ProcessVideoClipJob implements ShouldQueue
             File::delete($assPath);
         }
 
-        if ($process->isSuccessful()) {
-            $this->clip->update([
-                'status'    => 'ready',
-                'clip_path' => 'clips/' . $outputFileName,
-            ]);
-            Log::info("Render Success: {$outputPath}", ['clip_id' => $this->clip->id]);
-        } else {
+        if (!$process->isSuccessful()) {
             $this->clip->update(['status' => 'failed']);
             Log::error("FFmpeg Error clip_id {$this->clip->id}: " . $process->getErrorOutput());
+            return;
         }
+
+        Log::info("Render Success: {$outputPath}", ['clip_id' => $this->clip->id]);
+
+        // STEP 3: Generate thumbnail dari frame tengah klip
+        $thumbnailPath = null;
+        try {
+            // Ambil frame di detik ke-3 klip (atau tengah kalau durasi pendek)
+            $frameAt = min(3, $duration / 2);
+
+            $thumbProcess = new Process([
+                $ffmpegPath,
+                '-y',
+                '-ss',
+                (string) ($this->clip->start_time + $frameAt),
+                '-i',
+                $videoInputPath,
+                '-vframes',
+                '1',                          // Ambil 1 frame saja
+                '-vf',
+                $cropFilter,                       // Sama crop portrait seperti klip
+                '-q:v',
+                '2',                              // Kualitas JPEG (1=terbaik, 31=terburuk)
+                $thumbPath
+            ]);
+
+            $thumbProcess->setTimeout(60);
+            $thumbProcess->run();
+
+            if ($thumbProcess->isSuccessful() && File::exists($thumbPath)) {
+                $thumbnailPath = 'thumbnails/' . $thumbFileName;
+                Log::info("Thumbnail berhasil dibuat: {$thumbPath}", ['clip_id' => $this->clip->id]);
+            } else {
+                Log::warning("Thumbnail gagal dibuat, klip tetap ready.", ['clip_id' => $this->clip->id]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Thumbnail exception: " . $e->getMessage(), ['clip_id' => $this->clip->id]);
+        }
+
+        // STEP 4: Update status klip
+        $this->clip->update([
+            'status'         => 'ready',
+            'clip_path'      => 'clips/' . $outputFileName,
+            'thumbnail_path' => $thumbnailPath,
+        ]);
     }
 
     private function resolveFfmpeg(): string
