@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Events\VideoStatusUpdated;
 use App\Models\Video;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -28,19 +29,23 @@ class DownloadVideoJob implements ShouldQueue
     public function handle()
     {
         $this->video->update(['status' => 'processing']);
+        VideoStatusUpdated::dispatch(
+            $this->video->id,
+            $this->video->user_id,
+            'downloading',
+            'Video sedang didownload...'
+        );
 
         $folderPath = storage_path('app/private/raw_videos');
         if (!File::exists($folderPath)) {
             File::makeDirectory($folderPath, 0755, true);
         }
 
-        // Paksa output .mp4 langsung — hindari %(ext)s yang rusak di Windows
         $outputPath = $folderPath . DIRECTORY_SEPARATOR . $this->video->id . '.mp4';
 
-        // Ambil path dari .env, fallback ke root project (karena yt-dlp.exe ada di sana)
         $ytDlpPath  = env('YTDLP_PATH', base_path('yt-dlp.exe'));
         $ffmpegPath = env('FFMPEG_PATH', 'C:\\ffmpeg\\bin\\ffmpeg.exe');
-        $ffmpegDir  = dirname($ffmpegPath); // yt-dlp butuh FOLDER-nya, bukan file-nya
+        $ffmpegDir  = dirname($ffmpegPath);
 
         Log::info("Menggunakan yt-dlp: {$ytDlpPath}", ['video_id' => $this->video->id]);
         Log::info("Menggunakan ffmpeg dir: {$ffmpegDir}", ['video_id' => $this->video->id]);
@@ -74,6 +79,13 @@ class DownloadVideoJob implements ShouldQueue
 
                 Log::info("Download Success ID {$this->video->id}", ['video_id' => $this->video->id]);
 
+                VideoStatusUpdated::dispatch(
+                    $this->video->id,
+                    $this->video->user_id,
+                    'processing',
+                    'Download selesai, memulai transkripsi...'
+                );
+
                 ProcessTranscription::dispatch($this->video);
             } else {
                 throw new \Exception("File tidak ditemukan setelah download selesai.");
@@ -81,6 +93,13 @@ class DownloadVideoJob implements ShouldQueue
         } catch (\Exception $e) {
             Log::error("Download Failed ID {$this->video->id}: " . $e->getMessage());
             $this->video->update(['status' => 'failed']);
+
+            VideoStatusUpdated::dispatch(
+                $this->video->id,
+                $this->video->user_id,
+                'failed',
+                'Download video gagal.'
+            );
 
             if (File::exists($outputPath)) {
                 File::delete($outputPath);
@@ -92,5 +111,12 @@ class DownloadVideoJob implements ShouldQueue
     {
         Log::error("DownloadVideoJob permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
         $this->video->update(['status' => 'failed']);
+
+        VideoStatusUpdated::dispatch(
+            $this->video->id,
+            $this->video->user_id,
+            'failed',
+            'Download video gagal permanen.'
+        );
     }
 }

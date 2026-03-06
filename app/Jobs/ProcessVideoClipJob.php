@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Events\ClipStatusUpdated;
 use App\Models\Clip;
 use App\Services\CaptionService;
 use Illuminate\Bus\Queueable;
@@ -33,21 +34,33 @@ class ProcessVideoClipJob implements ShouldQueue
         $video          = $this->clip->video;
         $videoInputPath = storage_path('app/' . $video->file_path);
 
+        ClipStatusUpdated::dispatch(
+            $this->clip->id,
+            $this->clip->video_id,
+            $video->user_id,
+            'rendering',
+            'Klip sedang dirender...'
+        );
+
         if (!File::exists($videoInputPath)) {
             Log::error("Video input tidak ditemukan: {$videoInputPath}", ['clip_id' => $this->clip->id]);
             $this->clip->update(['status' => 'failed']);
+
+            ClipStatusUpdated::dispatch(
+                $this->clip->id,
+                $this->clip->video_id,
+                $video->user_id,
+                'failed',
+                'File video tidak ditemukan.'
+            );
             return;
         }
 
         $outputDir = storage_path('app/public/clips');
-        if (!File::exists($outputDir)) {
-            File::makeDirectory($outputDir, 0755, true);
-        }
+        if (!File::exists($outputDir)) File::makeDirectory($outputDir, 0755, true);
 
         $thumbDir = storage_path('app/public/thumbnails');
-        if (!File::exists($thumbDir)) {
-            File::makeDirectory($thumbDir, 0755, true);
-        }
+        if (!File::exists($thumbDir)) File::makeDirectory($thumbDir, 0755, true);
 
         $outputFileName = 'clip_' . $this->clip->id . '.mp4';
         $outputPath     = $outputDir . DIRECTORY_SEPARATOR . $outputFileName;
@@ -56,15 +69,21 @@ class ProcessVideoClipJob implements ShouldQueue
 
         $assPath = storage_path('app/private/captions/clip_' . $this->clip->id . '.ass');
         $assDir  = dirname($assPath);
-        if (!File::exists($assDir)) {
-            File::makeDirectory($assDir, 0755, true);
-        }
+        if (!File::exists($assDir)) File::makeDirectory($assDir, 0755, true);
 
         $duration = max(0, $this->clip->end_time - $this->clip->start_time);
 
         if ($duration <= 0) {
             Log::error("Durasi clip tidak valid", ['clip_id' => $this->clip->id]);
             $this->clip->update(['status' => 'failed']);
+
+            ClipStatusUpdated::dispatch(
+                $this->clip->id,
+                $this->clip->video_id,
+                $video->user_id,
+                'failed',
+                'Durasi klip tidak valid.'
+            );
             return;
         }
 
@@ -73,8 +92,6 @@ class ProcessVideoClipJob implements ShouldQueue
             $transcription = $video->transcription;
             $words         = $transcription->json_data['words'] ?? [];
 
-            // Prioritas ambil full_text dari kolom langsung (sudah plain text)
-            // Fallback ke json_data['full_text'] jika kolom kosong
             $fullText = $transcription->full_text ?? '';
             if (empty($fullText)) {
                 $fullText = $transcription->json_data['full_text'] ?? '';
@@ -145,7 +162,6 @@ class ProcessVideoClipJob implements ShouldQueue
         $process->setTimeout(1200);
         $process->run();
 
-        // Cleanup temp ASS
         if ($assPath && File::exists($assPath)) {
             File::delete($assPath);
         }
@@ -153,6 +169,14 @@ class ProcessVideoClipJob implements ShouldQueue
         if (!$process->isSuccessful()) {
             $this->clip->update(['status' => 'failed']);
             Log::error("FFmpeg Error clip_id {$this->clip->id}: " . $process->getErrorOutput());
+
+            ClipStatusUpdated::dispatch(
+                $this->clip->id,
+                $this->clip->video_id,
+                $video->user_id,
+                'failed',
+                'Render klip gagal.'
+            );
             return;
         }
 
@@ -198,13 +222,23 @@ class ProcessVideoClipJob implements ShouldQueue
             'clip_path'      => 'clips/' . $outputFileName,
             'thumbnail_path' => $thumbnailPath,
         ]);
+
+        ClipStatusUpdated::dispatch(
+            $this->clip->id,
+            $this->clip->video_id,
+            $video->user_id,
+            'ready',
+            'Klip siap ditonton!',
+            [
+                'clip_url'      => url('/api/clips/' . $this->clip->id . '/stream'),
+                'thumbnail_url' => $thumbnailPath ? asset('storage/' . $thumbnailPath) : null,
+            ]
+        );
     }
 
     private function resolveFfmpeg(): string
     {
-        if ($envPath = env('FFMPEG_PATH')) {
-            return $envPath;
-        }
+        if ($envPath = env('FFMPEG_PATH')) return $envPath;
 
         if (PHP_OS_FAMILY === 'Windows') {
             $default = 'C:\\ffmpeg\\bin\\ffmpeg.exe';
@@ -233,5 +267,13 @@ class ProcessVideoClipJob implements ShouldQueue
     {
         Log::error("ProcessVideoClipJob permanently failed for clip ID {$this->clip->id}: " . $exception->getMessage());
         $this->clip->update(['status' => 'failed']);
+
+        ClipStatusUpdated::dispatch(
+            $this->clip->id,
+            $this->clip->video_id,
+            $this->clip->video->user_id,
+            'failed',
+            'Render klip gagal permanen.'
+        );
     }
 }

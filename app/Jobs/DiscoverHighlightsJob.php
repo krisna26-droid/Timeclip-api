@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Events\VideoStatusUpdated;
 use App\Models\Video;
 use App\Models\Transcription;
 use App\Models\Clip;
@@ -30,18 +31,11 @@ class DiscoverHighlightsJob implements ShouldQueue
 
     private function timeToSeconds($time): float
     {
-        if (is_numeric($time)) {
-            return (float) $time;
-        }
+        if (is_numeric($time)) return (float) $time;
 
         $parts = explode(':', (string) $time);
-        if (count($parts) === 2) {
-            return (float) ($parts[0] * 60) + (float) $parts[1];
-        }
-
-        if (count($parts) === 3) {
-            return (float) ($parts[0] * 3600) + ($parts[1] * 60) + (float) $parts[2];
-        }
+        if (count($parts) === 2) return (float) ($parts[0] * 60) + (float) $parts[1];
+        if (count($parts) === 3) return (float) ($parts[0] * 3600) + ($parts[1] * 60) + (float) $parts[2];
 
         return (float) $time;
     }
@@ -50,12 +44,25 @@ class DiscoverHighlightsJob implements ShouldQueue
     {
         Log::info("Starting Highlight Discovery", ['video_id' => $this->video->id]);
 
+        VideoStatusUpdated::dispatch(
+            $this->video->id,
+            $this->video->user_id,
+            'processing',
+            'AI sedang mencari momen terbaik dari video...'
+        );
+
         $highlights = $highlightService->getHighlights($this->transcription->full_text);
 
         if (empty($highlights)) {
             Log::warning("AI tidak menemukan highlight untuk video ID: " . $this->video->id);
-            // Tetap set completed agar FE tidak stuck loading selamanya
             $this->video->update(['status' => 'completed']);
+
+            VideoStatusUpdated::dispatch(
+                $this->video->id,
+                $this->video->user_id,
+                'failed',
+                'AI tidak menemukan highlight dari video ini.'
+            );
             return;
         }
 
@@ -80,8 +87,14 @@ class DiscoverHighlightsJob implements ShouldQueue
             ProcessVideoClipJob::dispatch($clip);
         }
 
-        // Update status video ke completed agar FE tidak stuck di 90%
         $this->video->update(['status' => 'completed']);
+
+        VideoStatusUpdated::dispatch(
+            $this->video->id,
+            $this->video->user_id,
+            'rendering',
+            count($highlights) . ' klip ditemukan, sedang dirender...'
+        );
 
         Log::info("Berhasil membuat " . count($highlights) . " rencana klip.", ['video_id' => $this->video->id]);
     }
@@ -89,7 +102,13 @@ class DiscoverHighlightsJob implements ShouldQueue
     public function failed(\Throwable $exception): void
     {
         Log::error("DiscoverHighlightsJob permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
-        // Set failed agar FE tidak stuck loading juga
         $this->video->update(['status' => 'failed']);
+
+        VideoStatusUpdated::dispatch(
+            $this->video->id,
+            $this->video->user_id,
+            'failed',
+            'Analisis highlight gagal permanen.'
+        );
     }
 }

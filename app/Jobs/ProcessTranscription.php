@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Events\VideoStatusUpdated;
 use App\Models\Video;
 use App\Models\Transcription;
 use App\Services\GeminiService;
@@ -32,6 +33,12 @@ class ProcessTranscription implements ShouldQueue
         Log::info("=== PROCESS TRANSCRIPTION START ===", ['video_id' => $this->video->id]);
 
         $this->video->update(['status' => 'processing']);
+        VideoStatusUpdated::dispatch(
+            $this->video->id,
+            $this->video->user_id,
+            'processing',
+            'Sedang melakukan transkripsi audio...'
+        );
 
         $videoPath = storage_path('app/' . $this->video->file_path);
         $audioDir  = storage_path('app/private/audio');
@@ -44,6 +51,13 @@ class ProcessTranscription implements ShouldQueue
         if (!File::exists($videoPath)) {
             Log::error("Video file tidak ditemukan: {$videoPath}", ['video_id' => $this->video->id]);
             $this->video->update(['status' => 'failed']);
+
+            VideoStatusUpdated::dispatch(
+                $this->video->id,
+                $this->video->user_id,
+                'failed',
+                'File video tidak ditemukan.'
+            );
             return;
         }
 
@@ -77,13 +91,12 @@ class ProcessTranscription implements ShouldQueue
 
             $aiResult = $gemini->transcribe($audioPath);
 
-            // Ambil full_text dan words yang sudah bersih dari GeminiService
             $fullText = $aiResult['full_text'] ?? '';
             $words    = $aiResult['words'] ?? [];
 
             Log::info("Menyimpan transcription.", [
-                'video_id'   => $this->video->id,
-                'word_count' => count($words),
+                'video_id'     => $this->video->id,
+                'word_count'   => count($words),
                 'text_preview' => substr($fullText, 0, 100),
             ]);
 
@@ -96,10 +109,16 @@ class ProcessTranscription implements ShouldQueue
                 ],
             ]);
 
-            // Hapus file audio setelah selesai
             if (File::exists($audioPath)) {
                 File::delete($audioPath);
             }
+
+            VideoStatusUpdated::dispatch(
+                $this->video->id,
+                $this->video->user_id,
+                'processing',
+                'Transkripsi selesai, AI sedang menganalisis highlight...'
+            );
 
             DiscoverHighlightsJob::dispatch($this->video, $transcription);
 
@@ -107,6 +126,13 @@ class ProcessTranscription implements ShouldQueue
         } catch (\Throwable $e) {
             Log::error("TRANSCRIPTION FAILED ID {$this->video->id}: " . $e->getMessage());
             $this->video->update(['status' => 'failed']);
+
+            VideoStatusUpdated::dispatch(
+                $this->video->id,
+                $this->video->user_id,
+                'failed',
+                'Transkripsi gagal: ' . $e->getMessage()
+            );
 
             if (File::exists($audioPath)) {
                 File::delete($audioPath);
@@ -123,5 +149,12 @@ class ProcessTranscription implements ShouldQueue
     {
         Log::error("ProcessTranscription permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
         $this->video->update(['status' => 'failed']);
+
+        VideoStatusUpdated::dispatch(
+            $this->video->id,
+            $this->video->user_id,
+            'failed',
+            'Transkripsi gagal permanen.'
+        );
     }
 }
