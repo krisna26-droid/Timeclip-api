@@ -39,13 +39,14 @@ class ClipController extends Controller
         return response()->json([
             'status' => 'success',
             'data'   => $clips->getCollection()->map(fn($clip) => [
-                'id'          => $clip->id,
-                'title'       => $clip->title,
-                'viral_score' => $clip->viral_score,
-                'duration'    => round($clip->end_time - $clip->start_time, 2),
-                'video_title' => $clip->video->title ?? 'Untitled Video',
-                'clip_url'    => $clip->clip_path ? asset('storage/' . $clip->clip_path) : null,
-                'created_at'  => $clip->created_at->diffForHumans(),
+                'id'             => $clip->id,
+                'title'          => $clip->title,
+                'viral_score'    => $clip->viral_score,
+                'duration'       => round($clip->end_time - $clip->start_time, 2),
+                'video_title'    => $clip->video->title ?? 'Untitled Video',
+                'clip_url'       => $clip->clip_path ? url('/api/clips/' . $clip->id . '/stream') : null,
+                'thumbnail_url'  => $clip->thumbnail_path ? asset('storage/' . $clip->thumbnail_path) : null,
+                'created_at'     => $clip->created_at->diffForHumans(),
             ]),
             'meta' => [
                 'current_page' => $clips->currentPage(),
@@ -77,11 +78,12 @@ class ClipController extends Controller
             'status'      => 'success',
             'video_title' => $video->title,
             'data'        => $clips->map(fn($c) => [
-                'id'          => $c->id,
-                'title'       => $c->title,
-                'viral_score' => $c->viral_score,
-                'status'      => $c->status,
-                'clip_url'    => $c->clip_path ? asset('storage/' . $c->clip_path) : null,
+                'id'            => $c->id,
+                'title'         => $c->title,
+                'viral_score'   => $c->viral_score,
+                'status'        => $c->status,
+                'clip_url'      => $c->clip_path ? url('/api/clips/' . $c->id . '/stream') : null,
+                'thumbnail_url' => $c->thumbnail_path ? asset('storage/' . $c->thumbnail_path) : null,
             ])
         ]);
     }
@@ -103,17 +105,77 @@ class ClipController extends Controller
         return response()->json([
             'status' => 'success',
             'data'   => [
-                'id'           => $clip->id,
-                'title'        => $clip->title,
-                'viral_score'  => $clip->viral_score,
-                'clip_url'     => asset('storage/' . $clip->clip_path),
-                'parent_video' => $clip->video->title
+                'id'            => $clip->id,
+                'title'         => $clip->title,
+                'viral_score'   => $clip->viral_score,
+                'clip_url'      => $clip->clip_path ? url('/api/clips/' . $clip->id . '/stream') : null,
+                'thumbnail_url' => $clip->thumbnail_path ? asset('storage/' . $clip->thumbnail_path) : null,
+                'parent_video'  => $clip->video->title,
             ]
         ]);
     }
 
     /**
-     * Re-render satu klip spesifik (misal setelah edit caption)
+     * Stream klip video — agar bisa diputar langsung di browser/FE
+     */
+    public function stream($id)
+    {
+        $clip = Clip::with('video:id,user_id')->find($id);
+
+        if (!$clip || $clip->video->user_id !== Auth::id()) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Klip tidak ditemukan atau akses ditolak.'
+            ], 404);
+        }
+
+        $path = storage_path('app/public/' . $clip->clip_path);
+
+        if (!file_exists($path)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'File tidak ditemukan.'
+            ], 404);
+        }
+
+        return response()->file($path, [
+            'Content-Type'        => 'video/mp4',
+            'Content-Disposition' => 'inline',
+            'Accept-Ranges'       => 'bytes',
+            'Cache-Control'       => 'public, max-age=3600',
+        ]);
+    }
+
+    /**
+     * Download klip
+     */
+    public function download($id)
+    {
+        $clip = Clip::with('video:id,user_id')->find($id);
+
+        if (!$clip || $clip->video->user_id !== Auth::id()) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Klip tidak ditemukan atau akses ditolak.'
+            ], 404);
+        }
+
+        $path = storage_path('app/public/' . $clip->clip_path);
+
+        if (!file_exists($path)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'File tidak ditemukan.'
+            ], 404);
+        }
+
+        return response()->download($path, $clip->title . '.mp4', [
+            'Content-Type' => 'video/mp4',
+        ]);
+    }
+
+    /**
+     * Re-render satu klip spesifik
      */
     public function rerender($id)
     {
@@ -155,7 +217,10 @@ class ClipController extends Controller
             ], 404);
         }
 
-        $results = $aiService->getHighlights((string) $video->transcription->full_text, $request->get('query'));
+        $results = $aiService->getHighlights(
+            (string) $video->transcription->full_text,
+            $request->get('query')
+        );
 
         if (empty($results)) {
             return response()->json([

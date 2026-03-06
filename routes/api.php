@@ -54,7 +54,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/videos/process', [VideoController::class, 'store']);
     Route::get('/videos/{id}', [VideoController::class, 'show']);
 
-    // Transcription — edit caption
+    // Transcription
     Route::get('/videos/{video_id}/transcription', [TranscriptionController::class, 'show']);
     Route::put('/videos/{video_id}/transcription', [TranscriptionController::class, 'update']);
     Route::post('/videos/{video_id}/transcription/rerender', [TranscriptionController::class, 'rerender']);
@@ -63,8 +63,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/clips/gallery', [ClipController::class, 'gallery']);
     Route::get('/videos/{video_id}/clips', [ClipController::class, 'index']);
     Route::get('/clips/{id}', [ClipController::class, 'show']);
-    Route::post('/clips/{id}/rerender', [ClipController::class, 'rerender']);
+    Route::get('/clips/{id}/stream', [ClipController::class, 'stream']);
     Route::get('/clips/{id}/download', [ClipController::class, 'download'])->name('clips.download');
+    Route::post('/clips/{id}/rerender', [ClipController::class, 'rerender']);
 
     // Ask AI Agent
     Route::post('/videos/{video_id}/ask-ai', [ClipController::class, 'askAI']);
