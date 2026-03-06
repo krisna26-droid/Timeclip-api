@@ -26,6 +26,9 @@ Route::get('/auth/github/callback', [AuthController::class, 'githubCallback']);
 */
 Route::middleware('auth:sanctum')->group(function () {
 
+    // Auth
+    Route::post('/logout', [AuthController::class, 'logout']);
+
     // Dashboard
     Route::get('/dashboard', [DashboardController::class, 'index']);
 
@@ -54,13 +57,14 @@ Route::middleware('auth:sanctum')->group(function () {
     // Transcription — edit caption
     Route::get('/videos/{video_id}/transcription', [TranscriptionController::class, 'show']);
     Route::put('/videos/{video_id}/transcription', [TranscriptionController::class, 'update']);
-    Route::post('/videos/{video_id}/transcription/rerender', [TranscriptionController::class, 'rerender']); // Re-render semua klip video
+    Route::post('/videos/{video_id}/transcription/rerender', [TranscriptionController::class, 'rerender']);
 
     // Clips
     Route::get('/clips/gallery', [ClipController::class, 'gallery']);
     Route::get('/videos/{video_id}/clips', [ClipController::class, 'index']);
     Route::get('/clips/{id}', [ClipController::class, 'show']);
-    Route::post('/clips/{id}/rerender', [ClipController::class, 'rerender']); // Re-render satu klip spesifik
+    Route::post('/clips/{id}/rerender', [ClipController::class, 'rerender']);
+    Route::get('/clips/{id}/download', [ClipController::class, 'download'])->name('clips.download');
 
     // Ask AI Agent
     Route::post('/videos/{video_id}/ask-ai', [ClipController::class, 'askAI']);
