@@ -26,40 +26,42 @@ Route::get('/auth/github/callback', [AuthController::class, 'githubCallback']);
 */
 Route::middleware('auth:sanctum')->group(function () {
 
-    // 🔥 TAMBAHAN UTAMA: Pintu Utama Dashboard (Tahap 11)
+    // Dashboard
     Route::get('/dashboard', [DashboardController::class, 'index']);
 
-    // 1. User Management & Credits (Tahap 3)
+    // User Credits
     Route::get('/user/credits', function (Request $request) {
-        $user = $request->user();
+        $user   = $request->user();
         $maxCap = [
-            'free' => 10,
-            'starter' => 100,
-            'pro' => 300,
+            'free'     => 10,
+            'starter'  => 100,
+            'pro'      => 300,
             'business' => 'unlimited'
         ];
         return response()->json([
             'remaining_credits' => $user->remaining_credits,
-            'tier' => $user->tier,
-            'max_cap' => $maxCap[$user->tier] ?? 10,
-            'last_reset' => $user->last_reset_date
+            'tier'              => $user->tier,
+            'max_cap'           => $maxCap[$user->tier] ?? 10,
+            'last_reset'        => $user->last_reset_date
         ]);
     });
 
-    // 2. Library Video & Tracker (Tahap 4 & 11)
+    // Video
     Route::get('/videos', [VideoController::class, 'index']);
     Route::post('/videos/process', [VideoController::class, 'store']);
     Route::get('/videos/{id}', [VideoController::class, 'show']);
 
-    // 3. Clip Management & AI Gallery (Tahap 12)
-    Route::get('/clips/gallery', [ClipController::class, 'gallery']); // ✅ DIPINDAH KE ATAS
-    Route::get('/videos/{video_id}/clips', [ClipController::class, 'index']);
-    Route::get('/clips/{id}', [ClipController::class, 'show']);
-
-    // 4. AI Agent Feature (Tahap 7)
-    Route::post('/videos/{video_id}/ask-ai', [ClipController::class, 'askAI']);
-
-    // 5. Transcription
+    // Transcription — edit caption
     Route::get('/videos/{video_id}/transcription', [TranscriptionController::class, 'show']);
     Route::put('/videos/{video_id}/transcription', [TranscriptionController::class, 'update']);
+    Route::post('/videos/{video_id}/transcription/rerender', [TranscriptionController::class, 'rerender']); // Re-render semua klip video
+
+    // Clips
+    Route::get('/clips/gallery', [ClipController::class, 'gallery']);
+    Route::get('/videos/{video_id}/clips', [ClipController::class, 'index']);
+    Route::get('/clips/{id}', [ClipController::class, 'show']);
+    Route::post('/clips/{id}/rerender', [ClipController::class, 'rerender']); // Re-render satu klip spesifik
+
+    // Ask AI Agent
+    Route::post('/videos/{video_id}/ask-ai', [ClipController::class, 'askAI']);
 });
