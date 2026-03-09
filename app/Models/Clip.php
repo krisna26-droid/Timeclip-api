@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Clip extends Model
 {
@@ -14,19 +15,25 @@ class Clip extends Model
         'end_time',
         'viral_score',
         'clip_path',
+        'thumbnail_path',
         'status'
     ];
 
+    protected $appends = ['duration_formatted'];
+
     public function video(): BelongsTo
     {
-        return $this->belongsTo(Video::class); //[cite: 221, 229]
+        return $this->belongsTo(Video::class);
     }
 
-    protected $appends = ['duration_formatted'];
+    public function subtitle(): HasOne
+    {
+        return $this->hasOne(ClipSubtitle::class);
+    }
 
     public function getDurationFormattedAttribute()
     {
         $seconds = $this->end_time - $this->start_time;
-        return gmdate("i:s", $seconds); // Mengubah ke format MM:SS
+        return gmdate("i:s", $seconds);
     }
 }

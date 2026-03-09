@@ -8,22 +8,11 @@ use App\Http\Controllers\Api\ClipController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\TranscriptionController;
 
-/*
-|--------------------------------------------------------------------------
-| API PUBLIC (Tanpa Login)
-|--------------------------------------------------------------------------
-*/
-
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login'])->name('login');
 Route::get('/auth/github/redirect', [AuthController::class, 'githubRedirect']);
 Route::get('/auth/github/callback', [AuthController::class, 'githubCallback']);
 
-/*
-|--------------------------------------------------------------------------
-| API PROTECTED (Wajib Bearer Token Sanctum)
-|--------------------------------------------------------------------------
-*/
 Route::middleware('auth:sanctum')->group(function () {
 
     // Auth
@@ -63,9 +52,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/clips/gallery', [ClipController::class, 'gallery']);
     Route::get('/videos/{video_id}/clips', [ClipController::class, 'index']);
     Route::get('/clips/{id}', [ClipController::class, 'show']);
+    Route::put('/clips/{id}', [ClipController::class, 'update']);
     Route::get('/clips/{id}/stream', [ClipController::class, 'stream']);
     Route::get('/clips/{id}/download', [ClipController::class, 'download'])->name('clips.download');
     Route::post('/clips/{id}/rerender', [ClipController::class, 'rerender']);
+    Route::get('/clips/{id}/subtitle', [ClipController::class, 'showSubtitle']);
+    Route::put('/clips/{id}/subtitle', [ClipController::class, 'updateSubtitle']);
 
     // Ask AI Agent
     Route::post('/videos/{video_id}/ask-ai', [ClipController::class, 'askAI']);

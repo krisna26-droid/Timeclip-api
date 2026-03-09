@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Events\ClipStatusUpdated;
 use App\Models\Clip;
+use App\Models\ClipSubtitle;
 use App\Services\CaptionService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -45,14 +46,7 @@ class ProcessVideoClipJob implements ShouldQueue
         if (!File::exists($videoInputPath)) {
             Log::error("Video input tidak ditemukan: {$videoInputPath}", ['clip_id' => $this->clip->id]);
             $this->clip->update(['status' => 'failed']);
-
-            ClipStatusUpdated::dispatch(
-                $this->clip->id,
-                $this->clip->video_id,
-                $video->user_id,
-                'failed',
-                'File video tidak ditemukan.'
-            );
+            ClipStatusUpdated::dispatch($this->clip->id, $this->clip->video_id, $video->user_id, 'failed', 'File video tidak ditemukan.');
             return;
         }
 
@@ -76,30 +70,32 @@ class ProcessVideoClipJob implements ShouldQueue
         if ($duration <= 0) {
             Log::error("Durasi clip tidak valid", ['clip_id' => $this->clip->id]);
             $this->clip->update(['status' => 'failed']);
-
-            ClipStatusUpdated::dispatch(
-                $this->clip->id,
-                $this->clip->video_id,
-                $video->user_id,
-                'failed',
-                'Durasi klip tidak valid.'
-            );
+            ClipStatusUpdated::dispatch($this->clip->id, $this->clip->video_id, $video->user_id, 'failed', 'Durasi klip tidak valid.');
             return;
         }
 
         // STEP 1: Generate ASS subtitle
+        // Prioritas: clip_subtitles (sudah diedit user) → fallback ke transcription video
         try {
-            $transcription = $video->transcription;
-            $words         = $transcription->json_data['words'] ?? [];
+            $clipSubtitle = $this->clip->subtitle;
 
-            $fullText = $transcription->full_text ?? '';
-            if (empty($fullText)) {
-                $fullText = $transcription->json_data['full_text'] ?? '';
+            if ($clipSubtitle) {
+                // Pakai subtitle per clip yang sudah diedit user
+                $words    = $clipSubtitle->words ?? [];
+                $fullText = $clipSubtitle->full_text ?? '';
+                Log::info("Pakai subtitle per clip.", ['clip_id' => $this->clip->id]);
+            } else {
+                // Fallback ke transcription video induk
+                $transcription = $video->transcription;
+                $words         = $transcription->json_data['words'] ?? [];
+                $fullText      = $transcription->full_text ?? '';
+                if (empty($fullText)) {
+                    $fullText = $transcription->json_data['full_text'] ?? '';
+                }
+                Log::info("Pakai transcription video induk.", ['clip_id' => $this->clip->id]);
             }
 
-            Log::info("Caption: words=" . count($words) . ", text_len=" . strlen($fullText), [
-                'clip_id' => $this->clip->id
-            ]);
+            Log::info("Caption: words=" . count($words) . ", text_len=" . strlen($fullText), ['clip_id' => $this->clip->id]);
 
             $captionService->generateAss(
                 words: $words,
@@ -169,14 +165,7 @@ class ProcessVideoClipJob implements ShouldQueue
         if (!$process->isSuccessful()) {
             $this->clip->update(['status' => 'failed']);
             Log::error("FFmpeg Error clip_id {$this->clip->id}: " . $process->getErrorOutput());
-
-            ClipStatusUpdated::dispatch(
-                $this->clip->id,
-                $this->clip->video_id,
-                $video->user_id,
-                'failed',
-                'Render klip gagal.'
-            );
+            ClipStatusUpdated::dispatch($this->clip->id, $this->clip->video_id, $video->user_id, 'failed', 'Render klip gagal.');
             return;
         }
 
@@ -208,7 +197,7 @@ class ProcessVideoClipJob implements ShouldQueue
 
             if ($thumbProcess->isSuccessful() && File::exists($thumbPath)) {
                 $thumbnailPath = 'thumbnails/' . $thumbFileName;
-                Log::info("Thumbnail berhasil dibuat: {$thumbPath}", ['clip_id' => $this->clip->id]);
+                Log::info("Thumbnail berhasil dibuat.", ['clip_id' => $this->clip->id]);
             } else {
                 Log::warning("Thumbnail gagal dibuat, klip tetap ready.", ['clip_id' => $this->clip->id]);
             }
@@ -222,6 +211,43 @@ class ProcessVideoClipJob implements ShouldQueue
             'clip_path'      => 'clips/' . $outputFileName,
             'thumbnail_path' => $thumbnailPath,
         ]);
+
+        // STEP 5: Seed subtitle dari transcription jika belum ada sama sekali
+        if (!$this->clip->subtitle) {
+            $transcription = $video->transcription;
+            if ($transcription) {
+                // 1. Ambil data asli (pastikan json_data sudah di-cast jadi array di Model Transcription)
+                $allWords = $transcription->json_data['words'] ?? [];
+
+                $clipStart = (float) $this->clip->start_time;
+                $clipEnd   = (float) $this->clip->end_time;
+
+                // 2. FILTER: Hanya ambil kata yang berada di dalam durasi klip
+                $filteredWords = array_values(array_filter($allWords, function ($w) use ($clipStart, $clipEnd) {
+                    return ($w['start'] >= $clipStart && $w['end'] <= $clipEnd);
+                }));
+
+                // 3. NORMALISASI: (Opsional) Geser waktu agar mulai dari 0.0 buat memudahkan FE
+                $normalizedWords = array_map(function ($w) use ($clipStart) {
+                    return [
+                        'word'  => $w['word'],
+                        'start' => round($w['start'] - $clipStart, 3),
+                        'end'   => round($w['end'] - $clipStart, 3),
+                    ];
+                }, $filteredWords);
+
+                // 4. SUSUN ULANG FULL TEXT: Gabungkan kata-kata yang sudah difilter saja
+                $filteredText = implode(' ', array_column($normalizedWords, 'word'));
+
+                ClipSubtitle::create([
+                    'clip_id'   => $this->clip->id,
+                    'full_text' => $filteredText,
+                    'words'     => $normalizedWords, // Masuk sebagai array, Laravel otomatis JSON-kan
+                ]);
+
+                Log::info("Subtitle di-seed dan difilter untuk klip.", ['clip_id' => $this->clip->id]);
+            }
+        }
 
         ClipStatusUpdated::dispatch(
             $this->clip->id,
