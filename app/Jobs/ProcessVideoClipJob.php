@@ -65,7 +65,9 @@ class ProcessVideoClipJob implements ShouldQueue
         $assDir  = dirname($assPath);
         if (!File::exists($assDir)) File::makeDirectory($assDir, 0755, true);
 
-        $duration = max(0, $this->clip->end_time - $this->clip->start_time);
+        $clipStart = (float) $this->clip->start_time;
+        $clipEnd   = (float) $this->clip->end_time;
+        $duration  = max(0, $clipEnd - $clipStart);
 
         if ($duration <= 0) {
             Log::error("Durasi clip tidak valid", ['clip_id' => $this->clip->id]);
@@ -75,35 +77,95 @@ class ProcessVideoClipJob implements ShouldQueue
         }
 
         // STEP 1: Generate ASS subtitle
-        // Prioritas: clip_subtitles (sudah diedit user) → fallback ke transcription video
         try {
             $clipSubtitle = $this->clip->subtitle;
 
             if ($clipSubtitle) {
-                // Pakai subtitle per clip yang sudah diedit user
+                // Words dari DB sudah normalized (start dari 0) → kirim clipStart=0
                 $words    = $clipSubtitle->words ?? [];
                 $fullText = $clipSubtitle->full_text ?? '';
                 Log::info("Pakai subtitle per clip.", ['clip_id' => $this->clip->id]);
+
+                $captionService->generateAss(
+                    words: $words,
+                    fullText: $fullText,
+                    clipStart: 0.0,
+                    clipEnd: $duration,
+                    outputPath: $assPath
+                );
             } else {
-                // Fallback ke transcription video induk
-                $transcription = $video->transcription;
-                $words         = $transcription->json_data['words'] ?? [];
-                $fullText      = $transcription->full_text ?? '';
-                if (empty($fullText)) {
-                    $fullText = $transcription->json_data['full_text'] ?? '';
+                $transcription      = $video->transcription;
+                $allWords           = $transcription->json_data['words'] ?? [];
+                $transcriptText     = $transcription->full_text ?? '';
+                $totalVideoDuration = max(1, (float) $video->duration);
+
+                $normalizedWords = [];
+                $filteredText    = '';
+
+                if (!empty($allWords)) {
+                    // FIX: Filter hanya berdasarkan start time
+                    // Kata dianggap masuk clip kalau start-nya ada di dalam range clip
+                    // Tidak pakai end time karena Gemini kadang kasih end > clipEnd untuk kata terakhir
+                    $filteredWords = array_values(array_filter($allWords, function ($w) use ($clipStart, $clipEnd) {
+                        return ($w['start'] >= $clipStart && $w['start'] < $clipEnd);
+                    }));
+
+                    $normalizedWords = array_map(function ($w) use ($clipStart, $duration) {
+                        return [
+                            'word'  => $w['word'],
+                            'start' => round($w['start'] - $clipStart, 3),
+                            // Clamp end agar tidak melebihi durasi clip
+                            'end'   => round(min($w['end'] - $clipStart, $duration), 3),
+                        ];
+                    }, $filteredWords);
+
+                    $filteredText = implode(' ', array_column($normalizedWords, 'word'));
+                    Log::info("Pakai word timestamps dari transcription.", ['clip_id' => $this->clip->id, 'words' => count($normalizedWords)]);
                 }
-                Log::info("Pakai transcription video induk.", ['clip_id' => $this->clip->id]);
+
+                // Fallback: words kosong tapi full_text ada
+                if (empty($normalizedWords) && !empty($transcriptText)) {
+                    Log::info("Words kosong, estimasi dari full_text via proporsi.", ['clip_id' => $this->clip->id]);
+
+                    $allWordsFromText = preg_split('/\s+/', trim($transcriptText));
+                    $totalWords       = count($allWordsFromText);
+                    $wordsPerSecond   = $totalWords / $totalVideoDuration;
+
+                    $startWordIdx = (int) floor($clipStart * $wordsPerSecond);
+                    $endWordIdx   = (int) ceil($clipEnd * $wordsPerSecond);
+                    $endWordIdx   = min($endWordIdx, $totalWords - 1);
+
+                    $clipWords    = array_slice($allWordsFromText, $startWordIdx, max(1, $endWordIdx - $startWordIdx + 1));
+                    $filteredText = implode(' ', $clipWords);
+
+                    $wordCount = count($clipWords);
+                    $perWord   = $duration / $wordCount;
+                    $current   = 0.0;
+
+                    foreach ($clipWords as $word) {
+                        $normalizedWords[] = [
+                            'word'  => trim($word),
+                            'start' => round($current, 3),
+                            'end'   => round($current + $perWord, 3),
+                        ];
+                        $current += $perWord;
+                    }
+
+                    Log::info("Estimasi selesai.", ['clip_id' => $this->clip->id, 'estimated_words' => count($normalizedWords)]);
+                }
+
+                Log::info("Pakai transcription video induk (filtered+normalized).", ['clip_id' => $this->clip->id]);
+
+                $captionService->generateAss(
+                    words: $normalizedWords,
+                    fullText: $filteredText,
+                    clipStart: 0.0,
+                    clipEnd: $duration,
+                    outputPath: $assPath
+                );
             }
 
-            Log::info("Caption: words=" . count($words) . ", text_len=" . strlen($fullText), ['clip_id' => $this->clip->id]);
-
-            $captionService->generateAss(
-                words: $words,
-                fullText: $fullText,
-                clipStart: (float) $this->clip->start_time,
-                clipEnd: (float) $this->clip->end_time,
-                outputPath: $assPath
-            );
+            Log::info("Caption generated.", ['clip_id' => $this->clip->id]);
         } catch (\Throwable $e) {
             Log::warning("Caption generation gagal: " . $e->getMessage(), ['clip_id' => $this->clip->id]);
             $assPath = null;
@@ -128,7 +190,7 @@ class ProcessVideoClipJob implements ShouldQueue
             $ffmpegPath,
             '-y',
             '-ss',
-            (string) $this->clip->start_time,
+            (string) $clipStart,
             '-t',
             (string) $duration,
             '-i',
@@ -180,7 +242,7 @@ class ProcessVideoClipJob implements ShouldQueue
                 $ffmpegPath,
                 '-y',
                 '-ss',
-                (string) ($this->clip->start_time + $frameAt),
+                (string) ($clipStart + $frameAt),
                 '-i',
                 $videoInputPath,
                 '-vframes',
@@ -212,37 +274,31 @@ class ProcessVideoClipJob implements ShouldQueue
             'thumbnail_path' => $thumbnailPath,
         ]);
 
-        // STEP 5: Seed subtitle dari transcription jika belum ada sama sekali
+        // STEP 5: Seed subtitle dari transcription jika belum ada
         if (!$this->clip->subtitle) {
             $transcription = $video->transcription;
             if ($transcription) {
-                // 1. Ambil data asli (pastikan json_data sudah di-cast jadi array di Model Transcription)
                 $allWords = $transcription->json_data['words'] ?? [];
 
-                $clipStart = (float) $this->clip->start_time;
-                $clipEnd   = (float) $this->clip->end_time;
-
-                // 2. FILTER: Hanya ambil kata yang berada di dalam durasi klip
+                // Pakai filter yang sama: berdasarkan start time saja
                 $filteredWords = array_values(array_filter($allWords, function ($w) use ($clipStart, $clipEnd) {
-                    return ($w['start'] >= $clipStart && $w['end'] <= $clipEnd);
+                    return ($w['start'] >= $clipStart && $w['start'] < $clipEnd);
                 }));
 
-                // 3. NORMALISASI: (Opsional) Geser waktu agar mulai dari 0.0 buat memudahkan FE
-                $normalizedWords = array_map(function ($w) use ($clipStart) {
+                $normalizedWords = array_map(function ($w) use ($clipStart, $duration) {
                     return [
                         'word'  => $w['word'],
                         'start' => round($w['start'] - $clipStart, 3),
-                        'end'   => round($w['end'] - $clipStart, 3),
+                        'end'   => round(min($w['end'] - $clipStart, $duration), 3),
                     ];
                 }, $filteredWords);
 
-                // 4. SUSUN ULANG FULL TEXT: Gabungkan kata-kata yang sudah difilter saja
                 $filteredText = implode(' ', array_column($normalizedWords, 'word'));
 
                 ClipSubtitle::create([
                     'clip_id'   => $this->clip->id,
                     'full_text' => $filteredText,
-                    'words'     => $normalizedWords, // Masuk sebagai array, Laravel otomatis JSON-kan
+                    'words'     => $normalizedWords,
                 ]);
 
                 Log::info("Subtitle di-seed dan difilter untuk klip.", ['clip_id' => $this->clip->id]);

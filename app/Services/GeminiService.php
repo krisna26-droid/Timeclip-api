@@ -8,103 +8,68 @@ use Symfony\Component\Process\Process;
 
 class GeminiService
 {
-    // Durasi setiap chunk dalam detik
-    private int $chunkDuration = 60;
-
     public function transcribe(string $audioPath): array
     {
-        Log::info("=== GEMINI TRANSCRIPTION START ===");
+        Log::info("=== GEMINI TRANSCRIPTION START (SINGLE REQUEST MODE) ===");
 
         $apiKey = config('services.gemini.key');
-        $model  = config('services.gemini.model');
+        $model  = config('services.gemini.model', 'gemini-2.5-flash');
 
         if (!$apiKey) throw new \Exception("Gemini API key belum dikonfigurasi.");
         if (!file_exists($audioPath)) throw new \Exception("File audio tidak ditemukan.");
 
-        // Dapatkan durasi total audio
         $totalDuration = $this->getAudioDuration($audioPath);
-        Log::info("Durasi audio: {$totalDuration} detik");
+        Log::info("Durasi audio utuh: {$totalDuration} detik");
 
-        // Kalau audio pendek (<= 90 detik), kirim langsung tanpa chunking
-        if ($totalDuration <= 90) {
-            Log::info("Audio pendek, kirim langsung tanpa chunking.");
-            return $this->transcribeChunk($audioPath, 0.0, $apiKey, $model);
+        try {
+            $result = $this->transcribeFullFile($audioPath, $apiKey, $model);
+
+            Log::info("Transkripsi berhasil.", [
+                'total_words'  => count($result['words'] ?? []),
+                'text_preview' => substr($result['full_text'] ?? '', 0, 100),
+            ]);
+
+            return $result;
+        } catch (\Throwable $e) {
+            Log::error("Gagal melakukan transkripsi: " . $e->getMessage());
+            throw $e;
         }
-
-        // Bagi audio jadi chunks
-        $chunks    = $this->splitAudio($audioPath, $totalDuration);
-        $allWords  = [];
-        $allTexts  = [];
-
-        Log::info("Audio dibagi menjadi " . count($chunks) . " chunk.");
-
-        foreach ($chunks as $index => $chunk) {
-            Log::info("Memproses chunk " . ($index + 1) . "/" . count($chunks) . " (offset: {$chunk['offset']}s)");
-
-            try {
-                $result = $this->transcribeChunk($chunk['path'], $chunk['offset'], $apiKey, $model);
-
-                $allTexts[] = $result['full_text'];
-
-                foreach ($result['words'] as $word) {
-                    $allWords[] = $word;
-                }
-
-                Log::info("Chunk " . ($index + 1) . " selesai: " . count($result['words']) . " words.");
-            } catch (\Throwable $e) {
-                Log::warning("Chunk " . ($index + 1) . " gagal: " . $e->getMessage() . ". Lanjut ke chunk berikutnya.");
-            } finally {
-                // Hapus file chunk temporary
-                if (file_exists($chunk['path'])) {
-                    unlink($chunk['path']);
-                }
-            }
-        }
-
-        $fullText = implode(' ', array_filter($allTexts));
-
-        Log::info("Transkripsi selesai.", [
-            'total_words'       => count($allWords),
-            'full_text_preview' => substr($fullText, 0, 100),
-        ]);
-
-        return [
-            'full_text' => $fullText,
-            'words'     => $allWords,
-        ];
     }
 
-    /**
-     * Transkripsi satu chunk audio, tambahkan offset ke timestamps
-     */
-    private function transcribeChunk(string $audioPath, float $offset, string $apiKey, string $model): array
+    private function transcribeFullFile(string $audioPath, string $apiKey, string $model): array
     {
         $mimeType     = mime_content_type($audioPath);
         $audioContent = base64_encode(file_get_contents($audioPath));
 
         $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
 
+        // Prompt diperketat:
+        // - Format compact [word,start,end] untuk hemat token
+        // - Instruksi eksplisit jangan potong di tengah
         $prompt = <<<PROMPT
-Transkripsikan audio ini ke dalam teks Bahasa Indonesia.
+Transcribe this audio accurately in its original language.
 
-Kembalikan HANYA JSON valid tanpa markdown, tanpa komentar, tanpa backtick.
-Format JSON yang diharapkan:
+Return ONLY a raw JSON object. No markdown, no backticks, no explanation.
+
+Use this EXACT structure:
 {
-  "full_text": "kalimat lengkap hasil transkripsi",
+  "full_text": "complete transcription here",
   "words": [
-    {"word": "kata", "start": 0.0, "end": 0.5},
-    {"word": "selanjutnya", "start": 0.6, "end": 1.2}
+    ["word1", 0.0, 0.5],
+    ["word2", 0.6, 1.1]
   ]
 }
 
-Aturan penting:
-- "start" dan "end" adalah waktu dalam detik (float), dimulai dari 0.0 untuk audio ini
-- Estimasi waktu seakurat mungkin berdasarkan ritme bicara
-- Jangan sertakan emoji, tanda baca berlebihan, atau simbol aneh
-- Pastikan JSON bisa di-parse langsung tanpa modifikasi apapun
+Rules:
+- "words" is an array of arrays: [word_string, start_seconds, end_seconds]
+- Use compact array format (NOT objects) to save space
+- Include EVERY spoken word
+- Timestamps are floats in seconds
+- Do NOT stop early — transcribe the complete audio from start to finish
+- Do NOT add any text before or after the JSON
 PROMPT;
 
-        $response = Http::timeout(300)
+        $response = Http::timeout(600)
             ->withHeaders(['Content-Type' => 'application/json'])
             ->post($endpoint, [
                 "contents" => [
@@ -120,272 +85,164 @@ PROMPT;
                             ]
                         ]
                     ]
+                ],
+                "generationConfig" => [
+                    "response_mime_type" => "application/json",
+                    "temperature"        => 0.0,    // Paling deterministik
+                    "maxOutputTokens"    => 65536,  // Cukup untuk 1300+ kata
                 ]
             ]);
 
         if (!$response->successful()) {
-            throw new \Exception("Gemini API error: " . $response->status());
+            throw new \Exception("Gemini API error: " . $response->status() . " - " . $response->body());
         }
 
-        $data = $response->json();
+        $data    = $response->json();
+        $rawText = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
 
-        if (!isset($data['candidates'][0]['content']['parts'][0]['text'])) {
-            throw new \Exception("Response Gemini tidak valid.");
-        }
-
-        $rawText = $data['candidates'][0]['content']['parts'][0]['text'];
-        $result  = $this->parseGeminiResponse($rawText);
-
-        // Tambahkan offset waktu ke setiap word
-        if ($offset > 0 && !empty($result['words'])) {
-            foreach ($result['words'] as &$word) {
-                $word['start'] = round($word['start'] + $offset, 3);
-                $word['end']   = round($word['end'] + $offset, 3);
-            }
-            unset($word);
-        }
-
-        return $result;
+        return $this->parseGeminiResponse($rawText);
     }
 
-    /**
-     * Potong audio jadi array chunk files menggunakan FFmpeg
-     */
-    private function splitAudio(string $audioPath, float $totalDuration): array
-    {
-        $chunks  = [];
-        $dir     = dirname($audioPath);
-        $baseName = pathinfo($audioPath, PATHINFO_FILENAME);
-
-        $ffmpegPath = $this->resolveFfmpeg();
-        $start      = 0.0;
-        $index      = 0;
-
-        while ($start < $totalDuration) {
-            $chunkPath = $dir . DIRECTORY_SEPARATOR . $baseName . '_chunk_' . $index . '.mp3';
-            $duration  = min($this->chunkDuration, $totalDuration - $start);
-
-            $process = new Process([
-                $ffmpegPath,
-                '-y',
-                '-ss',
-                (string) $start,
-                '-t',
-                (string) $duration,
-                '-i',
-                $audioPath,
-                '-acodec',
-                'libmp3lame',
-                '-q:a',
-                '2',
-                $chunkPath
-            ]);
-
-            $process->setTimeout(120);
-            $process->run();
-
-            if (!$process->isSuccessful() || !file_exists($chunkPath)) {
-                Log::warning("Gagal membuat chunk {$index} pada offset {$start}s");
-                $start += $this->chunkDuration;
-                $index++;
-                continue;
-            }
-
-            $chunks[] = [
-                'path'   => $chunkPath,
-                'offset' => $start,
-            ];
-
-            $start += $this->chunkDuration;
-            $index++;
-        }
-
-        return $chunks;
-    }
-
-    /**
-     * Dapatkan durasi audio dalam detik menggunakan FFprobe
-     */
-    private function getAudioDuration(string $audioPath): float
-    {
-        $ffprobePath = $this->resolveFfprobe();
-
-        $process = new Process([
-            $ffprobePath,
-            '-v',
-            'error',
-            '-show_entries',
-            'format=duration',
-            '-of',
-            'default=noprint_wrappers=1:nokey=1',
-            $audioPath
-        ]);
-
-        $process->setTimeout(30);
-        $process->run();
-
-        if ($process->isSuccessful()) {
-            $duration = trim($process->getOutput());
-            if (is_numeric($duration)) {
-                return (float) $duration;
-            }
-        }
-
-        // Fallback: asumsikan 600 detik kalau ffprobe gagal
-        Log::warning("FFprobe gagal mendapatkan durasi, asumsi 600 detik.");
-        return 600.0;
-    }
-
-    /**
-     * Parse response Gemini dengan multiple fallback strategy
-     */
     private function parseGeminiResponse(string $rawText): array
     {
         $clean = trim($rawText);
+
+        // Bersihkan markdown kalau masih ada
         $clean = preg_replace('/^```json\s*/i', '', $clean);
         $clean = preg_replace('/^```\s*/i',     '', $clean);
         $clean = preg_replace('/```\s*$/i',     '', $clean);
         $clean = trim($clean);
 
-        // Strategy 1: json_decode langsung
+        // Bersihkan control characters
+        $clean = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $clean);
+
+        // Normalisasi newline di dalam full_text
+        $clean = preg_replace_callback('/"full_text"\s*:\s*"(.*?)(?<!\\\\)"/s', function ($matches) {
+            $inner = str_replace(["\r\n", "\r", "\n"], ' ', $matches[1]);
+            return '"full_text": "' . $inner . '"';
+        }, $clean);
+
         $parsed = json_decode($clean, true);
-        if (json_last_error() === JSON_ERROR_NONE) {
-            $result = $this->extractFromParsed($parsed);
-            if ($result !== null) {
-                return $result;
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            Log::error("Gagal parse JSON Gemini: " . json_last_error_msg());
+            Log::debug("Raw text (200 char pertama): " . substr($clean, 0, 200));
+            return $this->extractFallback($clean);
+        }
+
+        // Proteksi Double JSON
+        if (isset($parsed['full_text']) && is_string($parsed['full_text'])) {
+            $testNested = json_decode($parsed['full_text'], true);
+            if (json_last_error() === JSON_ERROR_NONE && isset($testNested['full_text'])) {
+                Log::info("Mendeteksi Double JSON, melakukan ekstraksi...");
+                $parsed = $testNested;
             }
         }
 
-        // Strategy 2: Fix malformed JSON lalu decode ulang
-        $fixed  = $this->fixMalformedJson($clean);
-        $parsed = json_decode($fixed, true);
-        if (json_last_error() === JSON_ERROR_NONE) {
-            $result = $this->extractFromParsed($parsed);
-            if ($result !== null) {
-                return $result;
-            }
-        }
+        $fullText = $parsed['full_text'] ?? '';
+        $rawWords = $parsed['words'] ?? [];
 
-        // Strategy 3: Regex extraction
-        $fullText = $this->regexExtractFullText($clean);
-        $words    = $this->regexExtractWords($clean);
+        // Normalisasi format words:
+        // Support format compact array [word, start, end]
+        // maupun format object {word, start, end}
+        $words = $this->normalizeWords($rawWords);
 
-        if (!empty($fullText)) {
-            return [
-                'full_text' => $fullText,
-                'words'     => $words,
-            ];
-        }
-
-        // Strategy 4: Last resort
-        Log::warning("Semua strategy parsing gagal untuk chunk ini.");
         return [
-            'full_text' => $clean,
-            'words'     => [],
+            'full_text' => $fullText,
+            'words'     => $words,
         ];
     }
 
     /**
-     * Ekstrak full_text dan words dari array hasil json_decode
+     * Normalisasi words array:
+     * Format compact  : [["kata", 0.0, 0.5], ...]
+     * Format object   : [{"word": "kata", "start": 0.0, "end": 0.5}, ...]
+     * Keduanya dikonversi ke format object standar.
      */
-    private function extractFromParsed(?array $parsed): ?array
+    private function normalizeWords(array $rawWords): array
     {
-        if (empty($parsed)) return null;
+        if (empty($rawWords)) return [];
 
-        if (isset($parsed['full_text'])) {
-            $fullText = $parsed['full_text'];
+        $normalized = [];
 
-            // Cek nested JSON
-            if (is_string($fullText) && str_starts_with(trim($fullText), '{')) {
-                $nested = json_decode($fullText, true);
-                if (json_last_error() === JSON_ERROR_NONE && isset($nested['full_text'])) {
-                    $fullText            = $nested['full_text'];
-                    $parsed['words'] = $nested['words'] ?? $parsed['words'] ?? [];
-                }
-            }
-
-            $words = $parsed['words'] ?? [];
-
-            $validWords = array_values(array_filter($words, function ($w) {
-                return isset($w['word'], $w['start'], $w['end'])
-                    && is_numeric($w['start'])
-                    && is_numeric($w['end']);
-            }));
-
-            if (!empty($fullText)) {
-                return [
-                    'full_text' => trim($fullText),
-                    'words'     => $validWords,
+        foreach ($rawWords as $w) {
+            if (is_array($w) && isset($w[0], $w[1], $w[2])) {
+                // Format compact: ["kata", 0.0, 0.5]
+                $normalized[] = [
+                    'word'  => (string) $w[0],
+                    'start' => (float)  $w[1],
+                    'end'   => (float)  $w[2],
+                ];
+            } elseif (is_array($w) && isset($w['word'], $w['start'], $w['end'])) {
+                // Format object: {"word": "kata", "start": 0.0, "end": 0.5}
+                $normalized[] = [
+                    'word'  => (string) $w['word'],
+                    'start' => (float)  $w['start'],
+                    'end'   => (float)  $w['end'],
                 ];
             }
         }
 
-        return null;
+        Log::info("Words normalized: " . count($normalized) . " kata.");
+
+        return $normalized;
     }
 
     /**
-     * Perbaiki JSON yang malformed
+     * Fallback manual kalau JSON tetap gagal di-parse.
      */
-    private function fixMalformedJson(string $json): string
+    private function extractFallback(string $raw): array
     {
-        // Hapus trailing comma sebelum ] atau }
-        $json = preg_replace('/,\s*([\]}])/m', '$1', $json);
+        Log::warning("Menggunakan fallback ekstraksi manual dari response Gemini.");
 
-        // Tutup JSON yang terpotong
-        $openBraces   = substr_count($json, '{') - substr_count($json, '}');
-        $openBrackets = substr_count($json, '[') - substr_count($json, ']');
+        $fullText = '';
+        $words    = [];
 
-        if ($openBraces > 0 || $openBrackets > 0) {
-            $lastComplete = strrpos($json, '},');
-            if ($lastComplete !== false) {
-                $json = substr($json, 0, $lastComplete + 1);
-            }
-            $json .= str_repeat(']', max(0, $openBrackets));
-            $json .= str_repeat('}', max(0, $openBraces));
+        // Ekstrak full_text via regex
+        if (preg_match('/"full_text"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"/s', $raw, $m)) {
+            $fullText = stripslashes($m[1]);
         }
 
-        return $json;
-    }
-
-    /**
-     * Ekstrak full_text via regex
-     */
-    private function regexExtractFullText(string $text): string
-    {
-        if (preg_match('/"full_text"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"/s', $text, $matches)) {
-            return trim(stripslashes($matches[1]));
-        }
-        return '';
-    }
-
-    /**
-     * Ekstrak words array via regex
-     */
-    private function regexExtractWords(string $text): array
-    {
-        $words   = [];
-        $pattern = '/\{\s*"word"\s*:\s*"([^"\\\\]*)"\s*,\s*"start"\s*:\s*([\d.]+)\s*,\s*"end"\s*:\s*([\d.]+)\s*\}/';
-
-        if (preg_match_all($pattern, $text, $matches, PREG_SET_ORDER)) {
-            foreach ($matches as $match) {
-                $words[] = [
-                    'word'  => $match[1],
-                    'start' => (float) $match[2],
-                    'end'   => (float) $match[3],
-                ];
+        // Ekstrak words array via regex — coba format compact dulu
+        if (preg_match('/"words"\s*:\s*(\[.*?\])/s', $raw, $m)) {
+            $wordsJson = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $m[1]);
+            $decoded   = json_decode($wordsJson, true);
+            if (is_array($decoded)) {
+                $words = $this->normalizeWords($decoded);
             }
         }
 
-        return $words;
+        Log::info("Fallback result: full_text_len=" . strlen($fullText) . ", words=" . count($words));
+
+        return [
+            'full_text' => $fullText,
+            'words'     => $words,
+        ];
     }
 
-    private function resolveFfmpeg(): string
+    private function getAudioDuration(string $audioPath): float
     {
-        return config('services.ffmpeg.path', env('FFMPEG_PATH', 'ffmpeg'));
-    }
+        try {
+            $ffprobePath = config('services.ffmpeg.probe_path', env('FFPROBE_PATH', 'ffprobe'));
+            $process     = new Process([
+                $ffprobePath,
+                '-v',
+                'error',
+                '-show_entries',
+                'format=duration',
+                '-of',
+                'default=noprint_wrappers=1:nokey=1',
+                $audioPath
+            ]);
+            $process->run();
 
-    private function resolveFfprobe(): string
-    {
-        return config('services.ffmpeg.probe_path', env('FFPROBE_PATH', 'ffprobe'));
+            if ($process->isSuccessful()) {
+                return (float) trim($process->getOutput());
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Gagal mendapatkan durasi: " . $e->getMessage());
+        }
+
+        return 0.0;
     }
 }

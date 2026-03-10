@@ -19,6 +19,11 @@ class Clip extends Model
         'status'
     ];
 
+    protected $casts = [
+        'start_time' => 'float',
+        'end_time'   => 'float',
+    ];
+
     protected $appends = ['duration_formatted'];
 
     public function video(): BelongsTo
