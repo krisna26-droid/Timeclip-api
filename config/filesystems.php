@@ -41,10 +41,23 @@ return [
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),
-            'url' => env('APP_URL').'/storage',
+            'url' => env('APP_URL') . '/storage',
             'visibility' => 'public',
             'throw' => false,
             'report' => false,
+        ],
+
+        // CONFIG KHUSUS SUPABASE (S3 COMPATIBLE)
+        'supabase' => [
+            'driver' => 's3',
+            'key' => env('SUPABASE_STORAGE_KEY'),
+            'secret' => env('SUPABASE_STORAGE_SECRET'),
+            'region' => env('SUPABASE_STORAGE_REGION'),
+            'bucket' => env('SUPABASE_STORAGE_BUCKET'),
+            'endpoint' => env('SUPABASE_STORAGE_URL'),
+            'use_path_style_endpoint' => true, // Wajib true untuk Supabase
+            'visibility' => 'public',
+            'throw' => true,
         ],
 
         's3' => [

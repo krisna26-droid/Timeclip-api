@@ -9,6 +9,7 @@ use App\Models\Video;
 use App\Services\AIHighlightService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage; // Wajib untuk akses Cloud
 
 class ClipController extends Controller
 {
@@ -19,7 +20,7 @@ class ClipController extends Controller
     {
         $user  = Auth::user();
         $clips = Clip::whereHas('video', function ($query) use ($user) {
-            $query->where('user_id', $user->id);
+            $query->where('user_id', (int) $user->id);
         })
             ->where('status', 'ready')
             ->with(['video' => function ($q) {
@@ -39,13 +40,14 @@ class ClipController extends Controller
         return response()->json([
             'status' => 'success',
             'data'   => $clips->getCollection()->map(fn($clip) => [
-                'id'            => $clip->id,
-                'title'         => $clip->title,
-                'viral_score'   => $clip->viral_score,
-                'duration'      => round($clip->end_time - $clip->start_time, 2),
-                'video_title'   => $clip->video->title ?? 'Untitled Video',
-                'clip_url'      => $clip->clip_path ? url('/api/clips/' . $clip->id . '/stream') : null,
-                'thumbnail_url' => $clip->thumbnail_path ? asset('storage/' . $clip->thumbnail_path) : null,
+                'id'            => (int) $clip->id,
+                'title'         => (string) $clip->title,
+                'viral_score'   => (float) $clip->viral_score,
+                'duration'      => round((float) $clip->end_time - (float) $clip->start_time, 2),
+                'video_title'   => (string) $clip->video->title ?? 'Untitled Video',
+                // UPDATE: Menggunakan URL Supabase
+                'clip_url'      => $clip->clip_path ? Storage::url((string) $clip->clip_path) : null,
+                'thumbnail_url' => $clip->thumbnail_path ? Storage::url((string) $clip->thumbnail_path) : null,
                 'created_at'    => $clip->created_at->diffForHumans(),
             ]),
             'meta' => [
@@ -76,18 +78,19 @@ class ClipController extends Controller
 
         return response()->json([
             'status'      => 'success',
-            'video_title' => $video->title,
+            'video_title' => (string) $video->title,
             'data'        => $clips->map(fn($c) => [
-                'id'            => $c->id,
-                'title'         => $c->title,
-                'viral_score'   => $c->viral_score,
-                'status'        => $c->status,
-                'start_time'    => $c->start_time,
-                'end_time'      => $c->end_time,
-                'clip_url'      => $c->clip_path ? url('/api/clips/' . $c->id . '/stream') : null,
-                'thumbnail_url' => $c->thumbnail_path ? asset('storage/' . $c->thumbnail_path) : null,
+                'id'            => (int) $c->id,
+                'title'         => (string) $c->title,
+                'viral_score'   => (float) $c->viral_score,
+                'status'        => (string) $c->status,
+                'start_time'    => (float) $c->start_time,
+                'end_time'      => (float) $c->end_time,
+                // UPDATE: Menggunakan URL Supabase
+                'clip_url'      => $c->clip_path ? Storage::url((string) $c->clip_path) : null,
+                'thumbnail_url' => $c->thumbnail_path ? Storage::url((string) $c->thumbnail_path) : null,
                 'subtitle'      => $c->subtitle ? [
-                    'full_text' => $c->subtitle->full_text,
+                    'full_text' => (string) $c->subtitle->full_text,
                     'words'     => $c->subtitle->words,
                 ] : null,
             ])
@@ -111,17 +114,18 @@ class ClipController extends Controller
         return response()->json([
             'status' => 'success',
             'data'   => [
-                'id'            => $clip->id,
-                'title'         => $clip->title,
-                'viral_score'   => $clip->viral_score,
-                'status'        => $clip->status,
-                'start_time'    => $clip->start_time,
-                'end_time'      => $clip->end_time,
-                'clip_url'      => $clip->clip_path ? url('/api/clips/' . $clip->id . '/stream') : null,
-                'thumbnail_url' => $clip->thumbnail_path ? asset('storage/' . $clip->thumbnail_path) : null,
-                'parent_video'  => $clip->video->title,
+                'id'            => (int) $clip->id,
+                'title'         => (string) $clip->title,
+                'viral_score'   => (float) $clip->viral_score,
+                'status'        => (string) $clip->status,
+                'start_time'    => (float) $clip->start_time,
+                'end_time'      => (float) $clip->end_time,
+                // UPDATE: Menggunakan URL Supabase
+                'clip_url'      => $clip->clip_path ? Storage::url((string) $clip->clip_path) : null,
+                'thumbnail_url' => $clip->thumbnail_path ? Storage::url((string) $clip->thumbnail_path) : null,
+                'parent_video'  => (string) $clip->video->title,
                 'subtitle'      => $clip->subtitle ? [
-                    'full_text' => $clip->subtitle->full_text,
+                    'full_text' => (string) $clip->subtitle->full_text,
                     'words'     => $clip->subtitle->words,
                 ] : null,
             ]
@@ -146,14 +150,14 @@ class ClipController extends Controller
             ], 404);
         }
 
-        $clip->update(['title' => $request->title]);
+        $clip->update(['title' => (string) $request->title]);
 
         return response()->json([
             'status'  => 'success',
             'message' => 'Judul klip berhasil diperbarui.',
             'data'    => [
-                'id'    => $clip->id,
-                'title' => $clip->title,
+                'id'    => (int) $clip->id,
+                'title' => (string) $clip->title,
             ]
         ]);
     }
@@ -195,10 +199,10 @@ class ClipController extends Controller
 
         // UPDATE: Eloquent akan otomatis casting array ke JSON
         $clip->subtitle()->updateOrCreate(
-            ['clip_id' => $clip->id],
+            ['clip_id' => (int) $clip->id],
             [
-                'full_text' => $request->full_text,
-                'words'     => $request->words,
+                'full_text' => (string) $request->full_text,
+                'words'     => $request->validated()['words'],
             ]
         );
 
@@ -209,7 +213,7 @@ class ClipController extends Controller
     }
 
     /**
-     * Stream klip video
+     * Stream klip video - UPDATE: Sekarang redirect ke Cloud
      */
     public function stream($id)
     {
@@ -222,25 +226,19 @@ class ClipController extends Controller
             ], 404);
         }
 
-        $path = storage_path('app/public/' . $clip->clip_path);
-
-        if (!file_exists($path)) {
+        if (!(string) $clip->clip_path) {
             return response()->json([
                 'status'  => 'error',
                 'message' => 'File tidak ditemukan.'
             ], 404);
         }
 
-        return response()->file($path, [
-            'Content-Type'        => 'video/mp4',
-            'Content-Disposition' => 'inline',
-            'Accept-Ranges'       => 'bytes',
-            'Cache-Control'       => 'public, max-age=3600',
-        ]);
+        // Langsung arahkan (redirect) ke URL publik Supabase
+        return redirect(Storage::url((string) $clip->clip_path));
     }
 
     /**
-     * Download klip
+     * Download klip - UPDATE: Sekarang redirect ke Cloud
      */
     public function download($id)
     {
@@ -253,18 +251,15 @@ class ClipController extends Controller
             ], 404);
         }
 
-        $path = storage_path('app/public/' . $clip->clip_path);
-
-        if (!file_exists($path)) {
+        if (!(string) $clip->clip_path) {
             return response()->json([
                 'status'  => 'error',
                 'message' => 'File tidak ditemukan.'
             ], 404);
         }
 
-        return response()->download($path, $clip->title . '.mp4', [
-            'Content-Type' => 'video/mp4',
-        ]);
+        // Redirect ke link cloud untuk download langsung
+        return redirect(Storage::url((string) $clip->clip_path));
     }
 
     /**
@@ -325,7 +320,7 @@ class ClipController extends Controller
         $newClips = [];
         foreach ($results as $item) {
             $clip = Clip::create([
-                'video_id'    => $video->id,
+                'video_id'    => (int) $video->id,
                 'title'       => $item['title'],
                 'start_time'  => $item['start_time'],
                 'end_time'    => $item['end_time'],
@@ -339,16 +334,17 @@ class ClipController extends Controller
 
         return response()->json([
             'status'  => 'success',
-            'message' => count($newClips) . ' momen baru ditemukan.',
+            'message' => \count($newClips) . ' momen baru ditemukan.',
             'data'    => $newClips
         ]);
     }
+
     private function getOrGenerateClipSubtitle(Clip $clip)
     {
         // Jika user sudah pernah edit manual, ambil dari tabel subtitles
         if ($clip->subtitle) {
             return [
-                'full_text' => $clip->subtitle->full_text,
+                'full_text' => (string) $clip->subtitle->full_text,
                 'words'     => $clip->subtitle->words
             ];
         }
@@ -362,18 +358,14 @@ class ClipController extends Controller
         $clipEnd   = (float) $clip->end_time;
 
         // Filter kata yang masuk range waktu klip
-        $filteredWords = array_values(array_filter($allWords, function ($w) use ($clipStart, $clipEnd) {
-            return ($w['start'] >= $clipStart && $w['start'] <= $clipEnd);
-        }));
+        $filteredWords = array_values(array_filter($allWords, fn($w) => $w['start'] >= $clipStart && $w['start'] <= $clipEnd));
 
         // Normalisasi waktu (start dari 0.0) agar Frontend mudah editnya
-        $normalizedWords = array_map(function ($w) use ($clipStart) {
-            return [
-                'word'  => $w['word'],
-                'start' => round($w['start'] - $clipStart, 3),
-                'end'   => round($w['end'] - $clipStart, 3),
-            ];
-        }, $filteredWords);
+        $normalizedWords = array_map(fn($w) => [
+            'word'  => $w['word'],
+            'start' => round($w['start'] - $clipStart, 3),
+            'end'   => round($w['end'] - $clipStart, 3),
+        ], $filteredWords);
 
         return [
             'full_text' => implode(' ', array_column($normalizedWords, 'word')),

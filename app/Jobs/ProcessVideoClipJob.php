@@ -14,6 +14,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Storage; // Wajib ditambah untuk Supabase
 use Symfony\Component\Process\Process;
 
 class ProcessVideoClipJob implements ShouldQueue
@@ -284,7 +285,34 @@ class ProcessVideoClipJob implements ShouldQueue
             Log::warning("Thumbnail exception: " . $e->getMessage(), ['clip_id' => $this->clip->id]);
         }
 
-        // STEP 4: Update status klip
+        // STEP 4: UPDATE STATUS & UPLOAD KE SUPABASE
+        // --- BAGIAN INI YANG KITA EDIT UNTUK SUPABASE ---
+        try {
+            Log::info("Uploading to Supabase...", ['clip_id' => $this->clip->id]);
+
+            // Upload Video
+            if (File::exists($outputPath)) {
+                Storage::disk('supabase')->put(
+                    'clips/' . $outputFileName,
+                    fopen($outputPath, 'r+'),
+                    ['visibility' => 'public', 'ContentType' => 'video/mp4']
+                );
+            }
+
+            // Upload Thumbnail
+            if ($thumbPath && File::exists($thumbPath)) {
+                Storage::disk('supabase')->put(
+                    'thumbnails/' . $thumbFileName,
+                    fopen($thumbPath, 'r+'),
+                    ['visibility' => 'public', 'ContentType' => 'image/jpeg']
+                );
+            }
+
+            Log::info("Upload ke Supabase Berhasil.", ['clip_id' => $this->clip->id]);
+        } catch (\Throwable $e) {
+            Log::error("Gagal Upload ke Supabase: " . $e->getMessage());
+        }
+
         $this->clip->update([
             'status'         => 'ready',
             'clip_path'      => 'clips/' . $outputFileName,
@@ -331,6 +359,12 @@ class ProcessVideoClipJob implements ShouldQueue
             }
         }
 
+        $supabaseUrl = config('filesystems.disks.supabase.url');
+        $supabaseBucket = config('filesystems.disks.supabase.bucket');
+        
+        $clipUrl = "{$supabaseUrl}/{$supabaseBucket}/clips/{$outputFileName}";
+        $thumbnailUrl = $thumbnailPath ? "{$supabaseUrl}/{$supabaseBucket}/{$thumbnailPath}" : null;
+        
         ClipStatusUpdated::dispatch(
             $this->clip->id,
             $this->clip->video_id,
@@ -338,8 +372,8 @@ class ProcessVideoClipJob implements ShouldQueue
             'ready',
             'Klip siap ditonton!',
             [
-                'clip_url'      => url('/api/clips/' . $this->clip->id . '/stream'),
-                'thumbnail_url' => $thumbnailPath ? asset('storage/' . $thumbnailPath) : null,
+                'clip_url'      => $clipUrl,
+                'thumbnail_url' => $thumbnailUrl,
             ]
         );
     }
