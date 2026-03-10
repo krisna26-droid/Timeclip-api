@@ -4,6 +4,7 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\Log;
 use App\Models\SystemLog;
+use Illuminate\Support\Facades\Auth;
 
 class CaptionService
 {
@@ -16,44 +17,53 @@ class CaptionService
     ): void {
 
         if (empty($words)) {
-            Log::info("CaptionService: Words kosong, estimasi otomatis berdasarkan teks.");
+            Log::info("Words kosong, estimasi otomatis.");
+
+            // LOG UNTUK ADMIN: Peringatan bahwa AI tidak memberikan timestamp kata per kata
+            SystemLog::create([
+                'service'  => 'FFMPEG',
+                'level'    => 'WARNING',
+                'category' => 'RENDER',
+                'user_id'  => Auth::id(),
+                'message'  => "Timestamp kata kosong, menggunakan estimasi otomatis.",
+                'payload'  => ['text_length' => strlen($fullText)]
+            ]);
+
             $words = $this->estimateWordTimestamps($fullText, $clipStart, $clipEnd);
         }
 
         if (empty($words)) {
-            Log::error("CaptionService: Gagal generate ASS karena data words dan fullText kosong.");
+            Log::warning("Tidak ada words untuk dibuat ASS.");
             return;
         }
 
         $clipDuration = max(0, $clipEnd - $clipStart);
         $normalized = [];
 
-        foreach ($words as $w) {
-            if (!isset($w['start'], $w['end'], $w['word'])) {
-                continue;
+        try {
+            foreach ($words as $w) {
+                if (!isset($w['start'], $w['end'], $w['word'])) {
+                    continue;
+                }
+
+                $start = max(0, $w['start'] - $clipStart);
+                $end   = max(0, $w['end'] - $clipStart);
+
+                if ($end > $clipDuration) $end = $clipDuration;
+                if ($end <= $start) $end = min($clipDuration, $start + 0.1);
+
+                $normalized[] = [
+                    'word'  => $this->cleanWord($w['word']),
+                    'start' => round($start, 3),
+                    'end'   => round($end, 3),
+                ];
             }
 
-            // Normalisasi waktu agar relatif terhadap awal klip (start at 0.0)
-            $start = max(0, $w['start'] - $clipStart);
-            $end   = max(0, $w['end'] - $clipStart);
+            if (empty($normalized)) {
+                Log::warning("Normalized words kosong.");
+                return;
+            }
 
-            // Proteksi durasi agar tidak melebihi batas klip
-            if ($end > $clipDuration) $end = $clipDuration;
-            if ($end <= $start) $end = min($clipDuration, $start + 0.1);
-
-            $normalized[] = [
-                'word'  => $this->cleanWord($w['word']),
-                'start' => round($start, 3),
-                'end'   => round($end, 3),
-            ];
-        }
-
-        if (empty($normalized)) {
-            Log::warning("CaptionService: Normalized words menghasilkan array kosong.");
-            return;
-        }
-
-        try {
             $assContent = $this->buildYoutubeKaraokeStyle($normalized);
 
             file_put_contents(
@@ -61,21 +71,45 @@ class CaptionService
                 mb_convert_encoding($assContent, 'UTF-8')
             );
 
-            Log::info("CaptionService: File ASS berhasil dibuat.", ['path' => $outputPath]);
-        } catch (\Exception $e) {
-            Log::error("CaptionService: Gagal menulis file ASS ke disk: " . $e->getMessage());
-            throw $e; // Lempar agar Job bisa menangkap dan mencatat ke SystemLog
+            Log::info("ASS karaoke berhasil dibuat.", [
+                'path' => $outputPath
+            ]);
+
+            // LOG UNTUK ADMIN: Berhasil render subtitle (Audit Trail)
+            SystemLog::create([
+                'service'  => 'FFMPEG',
+                'level'    => 'INFO',
+                'category' => 'RENDER',
+                'user_id'  => Auth::id(),
+                'message'  => "File ASS karaoke berhasil dibuat.",
+                'payload'  => ['output_path' => basename($outputPath), 'word_count' => count($normalized)]
+            ]);
+        } catch (\Throwable $e) {
+            Log::error("Gagal generate ASS: " . $e->getMessage());
+
+            // LOG UNTUK ADMIN: Error fatal saat render
+            SystemLog::create([
+                'service'  => 'FFMPEG',
+                'level'    => 'ERROR',
+                'category' => 'RENDER',
+                'user_id'  => Auth::id(),
+                'message'  => "Gagal membuat file subtitle ASS: " . $e->getMessage(),
+                'payload'  => ['trace' => substr($e->getTraceAsString(), 0, 500)]
+            ]);
+
+            throw $e;
         }
     }
 
     /**
-     * Build format subtitle karaoke ala YouTube Shorts
+     * ==========================================
+     * BUILD YOUTUBE KARAOKE STYLE (FIXED)
+     * ==========================================
      */
     private function buildYoutubeKaraokeStyle(array $words): string
     {
         if (empty($words)) return '';
 
-        // PlayResX/Y disesuaikan dengan rasio 9:16 (608x1080)
         $header = <<<ASS
 [Script Info]
 ScriptType: v4.00+
@@ -92,7 +126,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 ASS;
 
-        // Kelompokkan kata maksimal per 3 detik agar subtitle tidak menumpuk
         $groups = $this->splitByDuration($words, 3.0);
         $dialogues = '';
 
@@ -106,14 +139,12 @@ ASS;
             $lines = $this->splitBalancedLines($group);
 
             foreach ($lines as $lineIndex => $lineWords) {
-                foreach ($lineWords as $wordData) {
+                foreach ($lineWords as $i => $wordData) {
                     $duration = $wordData['end'] - $wordData['start'];
-                    // Format \k dalam centiseconds (1/100 detik)
                     $centiseconds = max(1, (int) round($duration * 100));
                     $karaokeText .= "{\\k{$centiseconds}}" . $wordData['word'] . " ";
                 }
 
-                // Jika ada 2 baris, tambahkan line break ASS
                 if ($lineIndex === 0 && count($lines) > 1) {
                     $karaokeText .= "\\N";
                 }
@@ -127,21 +158,27 @@ ASS;
 
     private function splitByDuration(array $words, float $maxSeconds): array
     {
+        if (empty($words)) return [];
+
         $groups = [];
         $current = [];
-        $startTime = $words[0]['start'] ?? 0;
+        $startTime = $words[0]['start'];
 
         foreach ($words as $word) {
-            if (empty($current)) $startTime = $word['start'];
+            if (empty($current)) {
+                $startTime = $word['start'];
+            }
             $current[] = $word;
-
             if (($word['end'] - $startTime) >= $maxSeconds) {
                 $groups[] = $current;
                 $current = [];
             }
         }
 
-        if (!empty($current)) $groups[] = $current;
+        if (!empty($current)) {
+            $groups[] = $current;
+        }
+
         return $groups;
     }
 
@@ -149,11 +186,11 @@ ASS;
     {
         $count = count($group);
         if ($count <= 6) return [$group];
-
         $mid = floor($count / 2);
+
         return [
-            array_slice($group, 0, (int)$mid),
-            array_slice($group, (int)$mid)
+            array_slice($group, 0, $mid),
+            array_slice($group, $mid)
         ];
     }
 
@@ -185,7 +222,8 @@ ASS;
         $h = floor($seconds / 3600);
         $m = floor(($seconds % 3600) / 60);
         $s = floor($seconds % 60);
-        $cs = (int) round(($seconds - floor($seconds)) * 100);
+        $fraction = $seconds - floor($seconds);
+        $cs = (int) round($fraction * 100);
 
         if ($cs === 100) {
             $cs = 0;

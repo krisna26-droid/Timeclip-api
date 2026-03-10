@@ -4,7 +4,7 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use App\Models\SystemLog; // Import Model SystemLog
+use App\Models\SystemLog;
 use Illuminate\Support\Facades\Auth;
 
 class AIHighlightService
@@ -26,12 +26,13 @@ class AIHighlightService
         if ($wordCount < 10) {
             Log::warning("Transkrip terlalu pendek untuk dianalisis ({$wordCount} kata).");
 
+            // LOG UNTUK ADMIN: Memberi tahu kenapa highlight tidak muncul
             SystemLog::create([
                 'service'  => 'GEMINI',
                 'level'    => 'WARNING',
-                'category' => 'CONTENT_SHORT',
+                'category' => 'USAGE',
                 'user_id'  => Auth::id(),
-                'message'  => "Transkrip terlalu pendek untuk dianalisis highlight ({$wordCount} kata).",
+                'message'  => "Highlight dibatalkan: Transkrip terlalu pendek ({$wordCount} kata).",
             ]);
 
             return [];
@@ -53,15 +54,12 @@ class AIHighlightService
         \"{$fullText}\"
 
         Rules:
-        1. Each segment should be between 10 to 60 seconds (be flexible if the video is short).
-        2. If the entire video is short (under 60 seconds), you may return the whole video as 1 segment.
-        3. Titles must be catchy and clickbait-style.
-        4. Viral score should reflect hook strength (1-100).
-        5. start_time and end_time must be numbers in seconds (e.g. 0, 12.5, 30).
+        1. Each segment should be between 10 to 60 seconds.
+        2. Titles catchy and clickbait-style.
+        3. Viral score 1-100.
+        4. start_time and end_time must be numbers in seconds.
 
         Return ONLY a raw JSON array of objects with keys: 'title', 'start_time', 'end_time', 'viral_score'.
-        Do not include any markdown, explanation, or formatting. Only the JSON array.
-        Example: [{\"title\":\"...\",\"start_time\":0,\"end_time\":30,\"viral_score\":85}]
         ";
 
         try {
@@ -73,62 +71,65 @@ class AIHighlightService
                 ]
             ]);
 
+            Log::info("Gemini raw response", ['body' => $response->body()]);
+
             if ($response->successful()) {
                 $result = $response->json();
                 $text   = $result['candidates'][0]['content']['parts'][0]['text'] ?? '[]';
 
-                // Bersihkan markdown jika ada
                 $text = preg_replace('/```json|```/i', '', $text);
                 $text = trim($text);
 
                 $highlights = json_decode($text, true);
 
                 if (!is_array($highlights)) {
+                    Log::warning("Gemini response bukan array JSON valid", ['text' => $text]);
+
+                    // LOG UNTUK ADMIN: Mencatat kegagalan parsing AI
                     SystemLog::create([
                         'service'  => 'GEMINI',
-                        'level'    => 'ERROR',
+                        'level'    => 'WARNING',
                         'category' => 'PARSE_ERROR',
                         'user_id'  => Auth::id(),
-                        'message'  => "AI gagal memberikan format JSON array yang valid untuk highlight.",
-                        'payload'  => ['raw_response' => $text]
+                        'message'  => "Gagal parse highlight JSON.",
+                        'payload'  => ['raw_text' => substr($text, 0, 500)]
                     ]);
+
                     return [];
                 }
 
-                // LOG BERHASIL: Catat jumlah highlight dan penggunaan token
+                // LOG UNTUK ADMIN: Berhasil menemukan momen viral (Audit Trail)
                 SystemLog::create([
                     'service'  => 'GEMINI',
                     'level'    => 'INFO',
-                    'category' => 'HIGHLIGHT_DISCOVERY',
+                    'category' => 'USAGE',
                     'user_id'  => Auth::id(),
-                    'message'  => "Berhasil menemukan " . count($highlights) . " highlight.",
-                    'payload'  => [
-                        'query' => $query,
-                        'usage' => $result['usageMetadata'] ?? null
-                    ]
+                    'message'  => "AI berhasil menemukan " . count($highlights) . " momen viral.",
+                    'payload'  => ['query' => $query, 'highlight_count' => count($highlights)]
                 ]);
 
                 return $highlights;
             }
 
-            // LOG ERROR API
+            // LOG UNTUK ADMIN: Error API Gemini
             SystemLog::create([
                 'service'  => 'GEMINI',
                 'level'    => 'ERROR',
                 'category' => 'API_ERROR',
                 'user_id'  => Auth::id(),
-                'message'  => "Gemini Highlight API Gagal: " . $response->status(),
-                'payload'  => $response->json()
+                'message'  => "Gemini Highlight API Error: " . $response->status(),
+                'payload'  => ['body' => $response->json()]
             ]);
         } catch (\Exception $e) {
             Log::error("AIHighlightService Exception: " . $e->getMessage());
 
+            // LOG UNTUK ADMIN: Crash Sistem
             SystemLog::create([
                 'service'  => 'GEMINI',
                 'level'    => 'ERROR',
                 'category' => 'SYSTEM',
                 'user_id'  => Auth::id(),
-                'message'  => "Exception pada AIHighlightService: " . $e->getMessage(),
+                'message'  => "Exception di AIHighlightService: " . $e->getMessage(),
             ]);
         }
 

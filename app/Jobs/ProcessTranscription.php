@@ -5,7 +5,7 @@ namespace App\Jobs;
 use App\Events\VideoStatusUpdated;
 use App\Models\Video;
 use App\Models\Transcription;
-use App\Models\SystemLog; // Import Model SystemLog
+use App\Models\SystemLog; // Tambahan
 use App\Services\GeminiService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -52,18 +52,24 @@ class ProcessTranscription implements ShouldQueue
         if (!File::exists($videoPath)) {
             Log::error("Video file tidak ditemukan: {$videoPath}", ['video_id' => $this->video->id]);
 
-            // LOG KE SYSTEM LOG
+            // LOG UNTUK ADMIN: File Master Tidak Ditemukan
             SystemLog::create([
                 'service'  => 'SYSTEM',
                 'level'    => 'ERROR',
-                'category' => 'FILE_MISSING',
+                'category' => 'RENDER',
                 'user_id'  => $this->video->user_id,
-                'message'  => "Transkripsi gagal: File video tidak ditemukan di storage.",
-                'payload'  => ['path' => $videoPath]
+                'message'  => "Transkripsi gagal: File video master tidak ditemukan di storage.",
+                'payload'  => ['path' => $videoPath, 'video_id' => $this->video->id]
             ]);
 
             $this->video->update(['status' => 'failed']);
-            VideoStatusUpdated::dispatch($this->video->id, $this->video->user_id, 'failed', 'File video tidak ditemukan.');
+
+            VideoStatusUpdated::dispatch(
+                $this->video->id,
+                $this->video->user_id,
+                'failed',
+                'File video tidak ditemukan.'
+            );
             return;
         }
 
@@ -88,15 +94,6 @@ class ProcessTranscription implements ShouldQueue
             $process->run();
 
             if (!$process->isSuccessful()) {
-                // LOG ERROR FFMPEG EXTRACTION
-                SystemLog::create([
-                    'service'  => 'FFMPEG',
-                    'level'    => 'ERROR',
-                    'category' => 'AUDIO_EXTRACTION',
-                    'user_id'  => $this->video->user_id,
-                    'message'  => "Gagal mengekstrak audio dari video ID: {$this->video->id}",
-                    'payload'  => ['error' => $process->getErrorOutput()]
-                ]);
                 throw new \Exception("FFmpeg ekstraksi audio gagal: " . $process->getErrorOutput());
             }
 
@@ -104,7 +101,6 @@ class ProcessTranscription implements ShouldQueue
                 throw new \Exception("File audio tidak tercipta setelah proses FFmpeg.");
             }
 
-            // Panggil GeminiService (Logika logging sukses/token sudah ada di dalam Service tersebut)
             $aiResult = $gemini->transcribe($audioPath);
 
             $fullText = $aiResult['full_text'] ?? '';
@@ -113,6 +109,7 @@ class ProcessTranscription implements ShouldQueue
             Log::info("Menyimpan transcription.", [
                 'video_id'     => $this->video->id,
                 'word_count'   => count($words),
+                'text_preview' => substr($fullText, 0, 100),
             ]);
 
             $transcription = Transcription::create([
@@ -135,20 +132,30 @@ class ProcessTranscription implements ShouldQueue
                 'Transkripsi selesai, AI sedang menganalisis highlight...'
             );
 
+            // LOG UNTUK ADMIN: Transkripsi Berhasil
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'INFO',
+                'category' => 'USAGE',
+                'user_id'  => $this->video->user_id,
+                'message'  => "Proses transkripsi berhasil diselesaikan.",
+                'payload'  => ['video_id' => $this->video->id, 'word_count' => count($words)]
+            ]);
+
             DiscoverHighlightsJob::dispatch($this->video, $transcription);
 
             Log::info("=== TRANSCRIPTION SUCCESS & HIGHLIGHT DISPATCHED ===", ['video_id' => $this->video->id]);
         } catch (\Throwable $e) {
             Log::error("TRANSCRIPTION FAILED ID {$this->video->id}: " . $e->getMessage());
 
-            // LOG ERROR KE DATABASE
+            // LOG UNTUK ADMIN: Kegagalan Proses Transkripsi
             SystemLog::create([
-                'service'  => 'SYSTEM',
+                'service'  => 'GEMINI',
                 'level'    => 'ERROR',
-                'category' => 'TRANSCRIPTION_JOB_ERROR',
+                'category' => 'SYSTEM',
                 'user_id'  => $this->video->user_id,
-                'message'  => "Exception saat transkripsi: " . $e->getMessage(),
-                'payload'  => ['trace' => substr($e->getTraceAsString(), 0, 500)]
+                'message'  => "Gagal melakukan transkripsi: " . $e->getMessage(),
+                'payload'  => ['video_id' => $this->video->id, 'trace' => substr($e->getTraceAsString(), 0, 500)]
             ]);
 
             $this->video->update(['status' => 'failed']);
@@ -160,7 +167,7 @@ class ProcessTranscription implements ShouldQueue
                 'Transkripsi gagal: ' . $e->getMessage()
             );
 
-            if (isset($audioPath) && File::exists($audioPath)) {
+            if (File::exists($audioPath)) {
                 File::delete($audioPath);
             }
         }
@@ -175,13 +182,14 @@ class ProcessTranscription implements ShouldQueue
     {
         Log::error("ProcessTranscription permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
 
+        // LOG UNTUK ADMIN: Kegagalan Permanen (Max Retries)
         SystemLog::create([
             'service'  => 'SYSTEM',
             'level'    => 'ERROR',
-            'category' => 'JOB_FAILED_PERMANENT',
-            'user_id'  => $this->video->user_id ?? null,
-            'message'  => "Job Transkripsi gagal permanen untuk video ID: {$this->video->id}",
-            'payload'  => ['error' => $exception->getMessage()]
+            'category' => 'SYSTEM',
+            'user_id'  => $this->video->user_id,
+            'message'  => "Job Transkripsi gagal permanen setelah retry.",
+            'payload'  => ['video_id' => $this->video->id, 'exception' => $exception->getMessage()]
         ]);
 
         $this->video->update(['status' => 'failed']);

@@ -35,7 +35,7 @@ class GeminiService
         } catch (\Throwable $e) {
             Log::error("Gagal melakukan transkripsi: " . $e->getMessage());
 
-            // LOG ERROR SYSTEM (Exception)
+            // LOG UNTUK ADMIN: Mencatat Exception Sistem
             SystemLog::create([
                 'service'  => 'GEMINI',
                 'level'    => 'ERROR',
@@ -104,7 +104,7 @@ PROMPT;
             ]);
 
         if (!$response->successful()) {
-            // LOG ERROR API (Bad Request, Auth Error, dsb)
+            // LOG UNTUK ADMIN: Mencatat Error API (Quota habis, Invalid Key, dll)
             SystemLog::create([
                 'service'  => 'GEMINI',
                 'level'    => 'ERROR',
@@ -120,9 +120,9 @@ PROMPT;
             throw new \Exception("Gemini API error: " . $response->status() . " - " . $response->body());
         }
 
-        $data    = $response->json();
+        $data = $response->json();
 
-        // LOG BERHASIL: Pantau penggunaan token untuk Admin Dashboard
+        // LOG UNTUK ADMIN: Mencatat TRAFIK Penggunaan Token (Metadata Usage)
         SystemLog::create([
             'service'  => 'GEMINI',
             'level'    => 'INFO',
@@ -131,7 +131,7 @@ PROMPT;
             'message'  => "Berhasil melakukan transkripsi audio.",
             'payload'  => [
                 'model' => $model,
-                'usage' => $data['usageMetadata'] ?? null, // Trafik token di sini
+                'usage' => $data['usageMetadata'] ?? null,
             ]
         ]);
 
@@ -161,7 +161,7 @@ PROMPT;
         if (json_last_error() !== JSON_ERROR_NONE) {
             Log::error("Gagal parse JSON Gemini: " . json_last_error_msg());
 
-            // LOG WARNING PARSE
+            // LOG UNTUK ADMIN: Warning jika JSON berantakan tapi masih bisa fallback
             SystemLog::create([
                 'service'  => 'GEMINI',
                 'level'    => 'WARNING',
@@ -184,6 +184,7 @@ PROMPT;
 
         $fullText = $parsed['full_text'] ?? '';
         $rawWords = $parsed['words'] ?? [];
+
         $words = $this->normalizeWords($rawWords);
 
         return [
@@ -195,7 +196,9 @@ PROMPT;
     private function normalizeWords(array $rawWords): array
     {
         if (empty($rawWords)) return [];
+
         $normalized = [];
+
         foreach ($rawWords as $w) {
             if (is_array($w) && isset($w[0], $w[1], $w[2])) {
                 $normalized[] = [
@@ -211,13 +214,16 @@ PROMPT;
                 ];
             }
         }
+
         Log::info("Words normalized: " . count($normalized) . " kata.");
+
         return $normalized;
     }
 
     private function extractFallback(string $raw): array
     {
         Log::warning("Menggunakan fallback ekstraksi manual dari response Gemini.");
+
         $fullText = '';
         $words    = [];
 
@@ -232,6 +238,8 @@ PROMPT;
                 $words = $this->normalizeWords($decoded);
             }
         }
+
+        Log::info("Fallback result: full_text_len=" . strlen($fullText) . ", words=" . count($words));
 
         return [
             'full_text' => $fullText,
@@ -254,12 +262,14 @@ PROMPT;
                 $audioPath
             ]);
             $process->run();
+
             if ($process->isSuccessful()) {
                 return (float) trim($process->getOutput());
             }
         } catch (\Throwable $e) {
             Log::warning("Gagal mendapatkan durasi: " . $e->getMessage());
         }
+
         return 0.0;
     }
 }

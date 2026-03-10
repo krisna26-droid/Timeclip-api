@@ -6,7 +6,7 @@ use App\Events\VideoStatusUpdated;
 use App\Models\Video;
 use App\Models\Transcription;
 use App\Models\Clip;
-use App\Models\SystemLog; // Import Model SystemLog
+use App\Models\SystemLog; // Tambahan
 use App\Services\AIHighlightService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -57,17 +57,13 @@ class DiscoverHighlightsJob implements ShouldQueue
         if (empty($highlights)) {
             Log::warning("AI tidak menemukan highlight untuk video ID: " . $this->video->id);
 
-            // LOG WARNING KE SYSTEM LOG
+            // LOG UNTUK ADMIN: Kasus dimana AI gagal memberikan saran momen
             SystemLog::create([
-                'service'  => 'SYSTEM',
+                'service'  => 'GEMINI',
                 'level'    => 'WARNING',
-                'category' => 'NO_HIGHLIGHTS',
+                'category' => 'USAGE',
                 'user_id'  => $this->video->user_id,
-                'message'  => "AI tidak menemukan highlight untuk video_id: {$this->video->id}",
-                'payload'  => [
-                    'transcript_length' => strlen($this->transcription->full_text),
-                    'word_count' => str_word_count($this->transcription->full_text)
-                ]
+                'message'  => "AI tidak menemukan highlight (kosong) untuk Video ID: {$this->video->id}.",
             ]);
 
             $this->video->update(['status' => 'completed']);
@@ -104,6 +100,16 @@ class DiscoverHighlightsJob implements ShouldQueue
 
         $this->video->update(['status' => 'completed']);
 
+        // LOG UNTUK ADMIN: Berhasil memecah video menjadi rencana klip
+        SystemLog::create([
+            'service'  => 'SYSTEM',
+            'level'    => 'INFO',
+            'category' => 'RENDER',
+            'user_id'  => $this->video->user_id,
+            'message'  => "AI berhasil mengidentifikasi " . count($highlights) . " momen viral.",
+            'payload'  => ['video_id' => $this->video->id, 'total_clips' => count($highlights)]
+        ]);
+
         VideoStatusUpdated::dispatch(
             $this->video->id,
             $this->video->user_id,
@@ -118,14 +124,14 @@ class DiscoverHighlightsJob implements ShouldQueue
     {
         Log::error("DiscoverHighlightsJob permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
 
-        // LOG ERROR PERMANEN KE DATABASE
+        // LOG UNTUK ADMIN: Kegagalan Fatal/Permanen
         SystemLog::create([
             'service'  => 'SYSTEM',
             'level'    => 'ERROR',
-            'category' => 'JOB_FAILED',
-            'user_id'  => $this->video->user_id ?? null,
-            'message'  => "Job DiscoverHighlightsJob gagal permanen untuk video ID {$this->video->id}",
-            'payload'  => ['error' => $exception->getMessage()]
+            'category' => 'SYSTEM',
+            'user_id'  => $this->video->user_id,
+            'message'  => "Job Highlight gagal permanen (Video ID: {$this->video->id}).",
+            'payload'  => ['exception' => $exception->getMessage()]
         ]);
 
         $this->video->update(['status' => 'failed']);
