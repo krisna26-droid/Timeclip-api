@@ -4,6 +4,8 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use App\Models\SystemLog; // Import Model SystemLog
+use Illuminate\Support\Facades\Auth;
 
 class AIHighlightService
 {
@@ -18,12 +20,20 @@ class AIHighlightService
 
     public function getHighlights(string $fullText, ?string $query = null): array
     {
-        // Kalau transkrip terlalu pendek, langsung skip
         $wordCount = str_word_count($fullText);
         Log::info("AIHighlightService: mulai analisis", ['word_count' => $wordCount]);
 
         if ($wordCount < 10) {
             Log::warning("Transkrip terlalu pendek untuk dianalisis ({$wordCount} kata).");
+
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'WARNING',
+                'category' => 'CONTENT_SHORT',
+                'user_id'  => Auth::id(),
+                'message'  => "Transkrip terlalu pendek untuk dianalisis highlight ({$wordCount} kata).",
+            ]);
+
             return [];
         }
 
@@ -63,36 +73,63 @@ class AIHighlightService
                 ]
             ]);
 
-            // Log response mentah agar mudah debug
-            Log::info("Gemini raw response", ['body' => $response->body()]);
-
             if ($response->successful()) {
                 $result = $response->json();
                 $text   = $result['candidates'][0]['content']['parts'][0]['text'] ?? '[]';
 
-                Log::info("Gemini highlight text", ['text' => $text]);
-
-                // Bersihkan kalau Gemini masih kasih markdown walaupun sudah dilarang
+                // Bersihkan markdown jika ada
                 $text = preg_replace('/```json|```/i', '', $text);
                 $text = trim($text);
 
                 $highlights = json_decode($text, true);
 
                 if (!is_array($highlights)) {
-                    Log::warning("Gemini response bukan array JSON valid", ['text' => $text]);
+                    SystemLog::create([
+                        'service'  => 'GEMINI',
+                        'level'    => 'ERROR',
+                        'category' => 'PARSE_ERROR',
+                        'user_id'  => Auth::id(),
+                        'message'  => "AI gagal memberikan format JSON array yang valid untuk highlight.",
+                        'payload'  => ['raw_response' => $text]
+                    ]);
                     return [];
                 }
 
-                Log::info("Highlight ditemukan", ['count' => count($highlights)]);
+                // LOG BERHASIL: Catat jumlah highlight dan penggunaan token
+                SystemLog::create([
+                    'service'  => 'GEMINI',
+                    'level'    => 'INFO',
+                    'category' => 'HIGHLIGHT_DISCOVERY',
+                    'user_id'  => Auth::id(),
+                    'message'  => "Berhasil menemukan " . count($highlights) . " highlight.",
+                    'payload'  => [
+                        'query' => $query,
+                        'usage' => $result['usageMetadata'] ?? null
+                    ]
+                ]);
+
                 return $highlights;
             }
 
-            Log::error("Gemini Highlight API Error", [
-                'status' => $response->status(),
-                'body'   => $response->body()
+            // LOG ERROR API
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'ERROR',
+                'category' => 'API_ERROR',
+                'user_id'  => Auth::id(),
+                'message'  => "Gemini Highlight API Gagal: " . $response->status(),
+                'payload'  => $response->json()
             ]);
         } catch (\Exception $e) {
             Log::error("AIHighlightService Exception: " . $e->getMessage());
+
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'ERROR',
+                'category' => 'SYSTEM',
+                'user_id'  => Auth::id(),
+                'message'  => "Exception pada AIHighlightService: " . $e->getMessage(),
+            ]);
         }
 
         return [];

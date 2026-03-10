@@ -5,6 +5,8 @@ namespace App\Services;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\Process\Process;
+use App\Models\SystemLog;
+use Illuminate\Support\Facades\Auth;
 
 class GeminiService
 {
@@ -32,6 +34,17 @@ class GeminiService
             return $result;
         } catch (\Throwable $e) {
             Log::error("Gagal melakukan transkripsi: " . $e->getMessage());
+
+            // LOG ERROR SYSTEM (Exception)
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'ERROR',
+                'category' => 'SYSTEM',
+                'user_id'  => Auth::id(),
+                'message'  => "Exception pada GeminiService: " . $e->getMessage(),
+                'payload'  => ['trace' => substr($e->getTraceAsString(), 0, 1000)]
+            ]);
+
             throw $e;
         }
     }
@@ -43,9 +56,6 @@ class GeminiService
 
         $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
 
-        // Prompt diperketat:
-        // - Format compact [word,start,end] untuk hemat token
-        // - Instruksi eksplisit jangan potong di tengah
         $prompt = <<<PROMPT
 Transcribe this audio accurately in its original language.
 
@@ -88,16 +98,43 @@ PROMPT;
                 ],
                 "generationConfig" => [
                     "response_mime_type" => "application/json",
-                    "temperature"        => 0.0,    // Paling deterministik
-                    "maxOutputTokens"    => 65536,  // Cukup untuk 1300+ kata
+                    "temperature"        => 0.0,
+                    "maxOutputTokens"    => 65536,
                 ]
             ]);
 
         if (!$response->successful()) {
+            // LOG ERROR API (Bad Request, Auth Error, dsb)
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'ERROR',
+                'category' => 'API_ERROR',
+                'user_id'  => Auth::id(),
+                'message'  => "Gemini API Error: " . $response->status(),
+                'payload'  => [
+                    'status' => $response->status(),
+                    'body'   => $response->json()
+                ]
+            ]);
+
             throw new \Exception("Gemini API error: " . $response->status() . " - " . $response->body());
         }
 
         $data    = $response->json();
+
+        // LOG BERHASIL: Pantau penggunaan token untuk Admin Dashboard
+        SystemLog::create([
+            'service'  => 'GEMINI',
+            'level'    => 'INFO',
+            'category' => 'USAGE',
+            'user_id'  => Auth::id(),
+            'message'  => "Berhasil melakukan transkripsi audio.",
+            'payload'  => [
+                'model' => $model,
+                'usage' => $data['usageMetadata'] ?? null, // Trafik token di sini
+            ]
+        ]);
+
         $rawText = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
 
         return $this->parseGeminiResponse($rawText);
@@ -107,16 +144,13 @@ PROMPT;
     {
         $clean = trim($rawText);
 
-        // Bersihkan markdown kalau masih ada
         $clean = preg_replace('/^```json\s*/i', '', $clean);
         $clean = preg_replace('/^```\s*/i',     '', $clean);
         $clean = preg_replace('/```\s*$/i',     '', $clean);
         $clean = trim($clean);
 
-        // Bersihkan control characters
         $clean = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $clean);
 
-        // Normalisasi newline di dalam full_text
         $clean = preg_replace_callback('/"full_text"\s*:\s*"(.*?)(?<!\\\\)"/s', function ($matches) {
             $inner = str_replace(["\r\n", "\r", "\n"], ' ', $matches[1]);
             return '"full_text": "' . $inner . '"';
@@ -126,11 +160,20 @@ PROMPT;
 
         if (json_last_error() !== JSON_ERROR_NONE) {
             Log::error("Gagal parse JSON Gemini: " . json_last_error_msg());
-            Log::debug("Raw text (200 char pertama): " . substr($clean, 0, 200));
+
+            // LOG WARNING PARSE
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'WARNING',
+                'category' => 'PARSE_ERROR',
+                'user_id'  => Auth::id(),
+                'message'  => "JSON Parse Error, mencoba fallback manual.",
+                'payload'  => ['error' => json_last_error_msg()]
+            ]);
+
             return $this->extractFallback($clean);
         }
 
-        // Proteksi Double JSON
         if (isset($parsed['full_text']) && is_string($parsed['full_text'])) {
             $testNested = json_decode($parsed['full_text'], true);
             if (json_last_error() === JSON_ERROR_NONE && isset($testNested['full_text'])) {
@@ -141,10 +184,6 @@ PROMPT;
 
         $fullText = $parsed['full_text'] ?? '';
         $rawWords = $parsed['words'] ?? [];
-
-        // Normalisasi format words:
-        // Support format compact array [word, start, end]
-        // maupun format object {word, start, end}
         $words = $this->normalizeWords($rawWords);
 
         return [
@@ -153,28 +192,18 @@ PROMPT;
         ];
     }
 
-    /**
-     * Normalisasi words array:
-     * Format compact  : [["kata", 0.0, 0.5], ...]
-     * Format object   : [{"word": "kata", "start": 0.0, "end": 0.5}, ...]
-     * Keduanya dikonversi ke format object standar.
-     */
     private function normalizeWords(array $rawWords): array
     {
         if (empty($rawWords)) return [];
-
         $normalized = [];
-
         foreach ($rawWords as $w) {
             if (is_array($w) && isset($w[0], $w[1], $w[2])) {
-                // Format compact: ["kata", 0.0, 0.5]
                 $normalized[] = [
                     'word'  => (string) $w[0],
                     'start' => (float)  $w[1],
                     'end'   => (float)  $w[2],
                 ];
             } elseif (is_array($w) && isset($w['word'], $w['start'], $w['end'])) {
-                // Format object: {"word": "kata", "start": 0.0, "end": 0.5}
                 $normalized[] = [
                     'word'  => (string) $w['word'],
                     'start' => (float)  $w['start'],
@@ -182,28 +211,20 @@ PROMPT;
                 ];
             }
         }
-
         Log::info("Words normalized: " . count($normalized) . " kata.");
-
         return $normalized;
     }
 
-    /**
-     * Fallback manual kalau JSON tetap gagal di-parse.
-     */
     private function extractFallback(string $raw): array
     {
         Log::warning("Menggunakan fallback ekstraksi manual dari response Gemini.");
-
         $fullText = '';
         $words    = [];
 
-        // Ekstrak full_text via regex
         if (preg_match('/"full_text"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"/s', $raw, $m)) {
             $fullText = stripslashes($m[1]);
         }
 
-        // Ekstrak words array via regex — coba format compact dulu
         if (preg_match('/"words"\s*:\s*(\[.*?\])/s', $raw, $m)) {
             $wordsJson = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $m[1]);
             $decoded   = json_decode($wordsJson, true);
@@ -211,8 +232,6 @@ PROMPT;
                 $words = $this->normalizeWords($decoded);
             }
         }
-
-        Log::info("Fallback result: full_text_len=" . strlen($fullText) . ", words=" . count($words));
 
         return [
             'full_text' => $fullText,
@@ -235,14 +254,12 @@ PROMPT;
                 $audioPath
             ]);
             $process->run();
-
             if ($process->isSuccessful()) {
                 return (float) trim($process->getOutput());
             }
         } catch (\Throwable $e) {
             Log::warning("Gagal mendapatkan durasi: " . $e->getMessage());
         }
-
         return 0.0;
     }
 }

@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Events\VideoStatusUpdated;
 use App\Models\Video;
+use App\Models\SystemLog; // Import model SystemLog
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -48,7 +49,6 @@ class DownloadVideoJob implements ShouldQueue
         $ffmpegDir  = dirname($ffmpegPath);
 
         Log::info("Menggunakan yt-dlp: {$ytDlpPath}", ['video_id' => $this->video->id]);
-        Log::info("Menggunakan ffmpeg dir: {$ffmpegDir}", ['video_id' => $this->video->id]);
 
         $process = new Process([
             $ytDlpPath,
@@ -77,7 +77,15 @@ class DownloadVideoJob implements ShouldQueue
                     'file_path' => 'private/raw_videos/' . $this->video->id . '.mp4'
                 ]);
 
-                Log::info("Download Success ID {$this->video->id}", ['video_id' => $this->video->id]);
+                // LOG SUKSES DOWNLOAD (Opsional untuk tracking trafik)
+                SystemLog::create([
+                    'service'  => 'YT-DLP',
+                    'level'    => 'INFO',
+                    'category' => 'DOWNLOAD_SUCCESS',
+                    'user_id'  => $this->video->user_id,
+                    'message'  => "Video berhasil didownload: ID {$this->video->id}",
+                    'payload'  => ['url' => $this->video->source_url]
+                ]);
 
                 VideoStatusUpdated::dispatch(
                     $this->video->id,
@@ -92,6 +100,21 @@ class DownloadVideoJob implements ShouldQueue
             }
         } catch (\Exception $e) {
             Log::error("Download Failed ID {$this->video->id}: " . $e->getMessage());
+
+            // LOG ERROR KE DATABASE UNTUK ADMIN
+            SystemLog::create([
+                'service'  => 'YT-DLP',
+                'level'    => 'ERROR',
+                'category' => 'DOWNLOAD_FAILED',
+                'user_id'  => $this->video->user_id,
+                'message'  => "Gagal mendownload video: " . substr($e->getMessage(), 0, 200),
+                'payload'  => [
+                    'url'   => $this->video->source_url,
+                    'error' => $e->getMessage(),
+                    'cmd'   => $process->getCommandLine()
+                ]
+            ]);
+
             $this->video->update(['status' => 'failed']);
 
             VideoStatusUpdated::dispatch(
@@ -109,7 +132,14 @@ class DownloadVideoJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error("DownloadVideoJob permanently failed for video ID {$this->video->id}: " . $exception->getMessage());
+        SystemLog::create([
+            'service'  => 'SYSTEM',
+            'level'    => 'ERROR',
+            'category' => 'JOB_FAILED',
+            'user_id'  => $this->video->user_id ?? null,
+            'message'  => "Job DownloadVideoJob gagal permanen: " . $exception->getMessage(),
+        ]);
+
         $this->video->update(['status' => 'failed']);
 
         VideoStatusUpdated::dispatch(

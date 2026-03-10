@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Events\ClipStatusUpdated;
 use App\Models\Clip;
 use App\Models\ClipSubtitle;
+use App\Models\SystemLog; // Import Model SystemLog
 use App\Services\CaptionService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -44,7 +45,19 @@ class ProcessVideoClipJob implements ShouldQueue
         );
 
         if (!File::exists($videoInputPath)) {
-            Log::error("Video input tidak ditemukan: {$videoInputPath}", ['clip_id' => $this->clip->id]);
+            $errorMsg = "Video input tidak ditemukan: {$videoInputPath}";
+            Log::error($errorMsg, ['clip_id' => $this->clip->id]);
+
+            // LOG KE SYSTEM LOG
+            SystemLog::create([
+                'service'  => 'FFMPEG',
+                'level'    => 'ERROR',
+                'category' => 'FILE_MISSING',
+                'user_id'  => $video->user_id,
+                'message'  => "Render gagal: File sumber video tidak ditemukan.",
+                'payload'  => ['path' => $videoInputPath, 'clip_id' => $this->clip->id]
+            ]);
+
             $this->clip->update(['status' => 'failed']);
             ClipStatusUpdated::dispatch($this->clip->id, $this->clip->video_id, $video->user_id, 'failed', 'File video tidak ditemukan.');
             return;
@@ -81,109 +94,45 @@ class ProcessVideoClipJob implements ShouldQueue
             $clipSubtitle = $this->clip->subtitle;
 
             if ($clipSubtitle) {
-                // Words dari DB sudah normalized (start dari 0) → kirim clipStart=0
                 $words    = $clipSubtitle->words ?? [];
                 $fullText = $clipSubtitle->full_text ?? '';
                 Log::info("Pakai subtitle per clip.", ['clip_id' => $this->clip->id]);
 
-                $captionService->generateAss(
-                    words: $words,
-                    fullText: $fullText,
-                    clipStart: 0.0,
-                    clipEnd: $duration,
-                    outputPath: $assPath
-                );
+                $captionService->generateAss($words, $fullText, 0.0, $duration, $assPath);
             } else {
                 $transcription      = $video->transcription;
                 $allWords           = $transcription->json_data['words'] ?? [];
                 $transcriptText     = $transcription->full_text ?? '';
-                $totalVideoDuration = max(1, (float) $video->duration);
 
-                $normalizedWords = [];
-                $filteredText    = '';
+                $filteredWords = array_values(array_filter($allWords, function ($w) use ($clipStart, $clipEnd) {
+                    return ($w['start'] >= $clipStart && $w['start'] < $clipEnd);
+                }));
 
-                if (!empty($allWords)) {
-                    // FIX: Filter hanya berdasarkan start time
-                    // Kata dianggap masuk clip kalau start-nya ada di dalam range clip
-                    // Tidak pakai end time karena Gemini kadang kasih end > clipEnd untuk kata terakhir
-                    $filteredWords = array_values(array_filter($allWords, function ($w) use ($clipStart, $clipEnd) {
-                        return ($w['start'] >= $clipStart && $w['start'] < $clipEnd);
-                    }));
+                $normalizedWords = array_map(function ($w) use ($clipStart, $duration) {
+                    return [
+                        'word'  => $w['word'],
+                        'start' => round($w['start'] - $clipStart, 3),
+                        'end'   => round(min($w['end'] - $clipStart, $duration), 3),
+                    ];
+                }, $filteredWords);
 
-                    $normalizedWords = array_map(function ($w) use ($clipStart, $duration) {
-                        return [
-                            'word'  => $w['word'],
-                            'start' => round($w['start'] - $clipStart, 3),
-                            // Clamp end agar tidak melebihi durasi clip
-                            'end'   => round(min($w['end'] - $clipStart, $duration), 3),
-                        ];
-                    }, $filteredWords);
-
-                    $filteredText = implode(' ', array_column($normalizedWords, 'word'));
-                    Log::info("Pakai word timestamps dari transcription.", ['clip_id' => $this->clip->id, 'words' => count($normalizedWords)]);
-                }
-
-                // Fallback: words kosong tapi full_text ada
-                if (empty($normalizedWords) && !empty($transcriptText)) {
-                    Log::info("Words kosong, estimasi dari full_text via proporsi.", ['clip_id' => $this->clip->id]);
-
-                    $allWordsFromText = preg_split('/\s+/', trim($transcriptText));
-                    $totalWords       = count($allWordsFromText);
-                    $wordsPerSecond   = $totalWords / $totalVideoDuration;
-
-                    $startWordIdx = (int) floor($clipStart * $wordsPerSecond);
-                    $endWordIdx   = (int) ceil($clipEnd * $wordsPerSecond);
-                    $endWordIdx   = min($endWordIdx, $totalWords - 1);
-
-                    $clipWords    = array_slice($allWordsFromText, $startWordIdx, max(1, $endWordIdx - $startWordIdx + 1));
-                    $filteredText = implode(' ', $clipWords);
-
-                    $wordCount = count($clipWords);
-                    $perWord   = $duration / $wordCount;
-                    $current   = 0.0;
-
-                    foreach ($clipWords as $word) {
-                        $normalizedWords[] = [
-                            'word'  => trim($word),
-                            'start' => round($current, 3),
-                            'end'   => round($current + $perWord, 3),
-                        ];
-                        $current += $perWord;
-                    }
-
-                    Log::info("Estimasi selesai.", ['clip_id' => $this->clip->id, 'estimated_words' => count($normalizedWords)]);
-                }
-
-                Log::info("Pakai transcription video induk (filtered+normalized).", ['clip_id' => $this->clip->id]);
-
-                $captionService->generateAss(
-                    words: $normalizedWords,
-                    fullText: $filteredText,
-                    clipStart: 0.0,
-                    clipEnd: $duration,
-                    outputPath: $assPath
-                );
+                $filteredText = implode(' ', array_column($normalizedWords, 'word'));
+                $captionService->generateAss($normalizedWords, $filteredText, 0.0, $duration, $assPath);
             }
-
-            Log::info("Caption generated.", ['clip_id' => $this->clip->id]);
         } catch (\Throwable $e) {
-            Log::warning("Caption generation gagal: " . $e->getMessage(), ['clip_id' => $this->clip->id]);
+            Log::warning("Caption generation gagal: " . $e->getMessage());
             $assPath = null;
         }
 
         // STEP 2: FFmpeg render klip
         $ffmpegPath = $this->resolveFfmpeg();
-        Log::info("Menggunakan ffmpeg: {$ffmpegPath}", ['clip_id' => $this->clip->id]);
-
         $cropFilter = "scale=-1:1080,crop=608:1080:(in_w-608)/2:0";
 
         if ($assPath && File::exists($assPath)) {
             $assEscaped = $this->escapeAssPath($assPath);
             $vfFilter   = "{$cropFilter},ass='{$assEscaped}'";
-            Log::info("Render dengan subtitle.", ['clip_id' => $this->clip->id]);
         } else {
             $vfFilter = $cropFilter;
-            Log::info("Render tanpa subtitle.", ['clip_id' => $this->clip->id]);
         }
 
         $command = [
@@ -225,19 +174,27 @@ class ProcessVideoClipJob implements ShouldQueue
         }
 
         if (!$process->isSuccessful()) {
+            // LOG ERROR RENDER KE DATABASE
+            SystemLog::create([
+                'service'  => 'FFMPEG',
+                'level'    => 'ERROR',
+                'category' => 'RENDER_FAILED',
+                'user_id'  => $video->user_id,
+                'message'  => "FFmpeg gagal me-render klip ID: {$this->clip->id}",
+                'payload'  => [
+                    'command' => $process->getCommandLine(),
+                    'error'   => $process->getErrorOutput(),
+                ]
+            ]);
+
             $this->clip->update(['status' => 'failed']);
-            Log::error("FFmpeg Error clip_id {$this->clip->id}: " . $process->getErrorOutput());
             ClipStatusUpdated::dispatch($this->clip->id, $this->clip->video_id, $video->user_id, 'failed', 'Render klip gagal.');
             return;
         }
 
-        Log::info("Render Success: {$outputPath}", ['clip_id' => $this->clip->id]);
-
         // STEP 3: Generate thumbnail
-        $thumbnailPath = null;
         try {
             $frameAt = min(3, $duration / 2);
-
             $thumbProcess = new Process([
                 $ffmpegPath,
                 '-y',
@@ -253,18 +210,10 @@ class ProcessVideoClipJob implements ShouldQueue
                 '2',
                 $thumbPath
             ]);
-
-            $thumbProcess->setTimeout(60);
             $thumbProcess->run();
-
-            if ($thumbProcess->isSuccessful() && File::exists($thumbPath)) {
-                $thumbnailPath = 'thumbnails/' . $thumbFileName;
-                Log::info("Thumbnail berhasil dibuat.", ['clip_id' => $this->clip->id]);
-            } else {
-                Log::warning("Thumbnail gagal dibuat, klip tetap ready.", ['clip_id' => $this->clip->id]);
-            }
+            $thumbnailPath = $thumbProcess->isSuccessful() ? 'thumbnails/' . $thumbFileName : null;
         } catch (\Throwable $e) {
-            Log::warning("Thumbnail exception: " . $e->getMessage(), ['clip_id' => $this->clip->id]);
+            $thumbnailPath = null;
         }
 
         // STEP 4: Update status klip
@@ -274,37 +223,7 @@ class ProcessVideoClipJob implements ShouldQueue
             'thumbnail_path' => $thumbnailPath,
         ]);
 
-        // STEP 5: Seed subtitle dari transcription jika belum ada
-        if (!$this->clip->subtitle) {
-            $transcription = $video->transcription;
-            if ($transcription) {
-                $allWords = $transcription->json_data['words'] ?? [];
-
-                // Pakai filter yang sama: berdasarkan start time saja
-                $filteredWords = array_values(array_filter($allWords, function ($w) use ($clipStart, $clipEnd) {
-                    return ($w['start'] >= $clipStart && $w['start'] < $clipEnd);
-                }));
-
-                $normalizedWords = array_map(function ($w) use ($clipStart, $duration) {
-                    return [
-                        'word'  => $w['word'],
-                        'start' => round($w['start'] - $clipStart, 3),
-                        'end'   => round(min($w['end'] - $clipStart, $duration), 3),
-                    ];
-                }, $filteredWords);
-
-                $filteredText = implode(' ', array_column($normalizedWords, 'word'));
-
-                ClipSubtitle::create([
-                    'clip_id'   => $this->clip->id,
-                    'full_text' => $filteredText,
-                    'words'     => $normalizedWords,
-                ]);
-
-                Log::info("Subtitle di-seed dan difilter untuk klip.", ['clip_id' => $this->clip->id]);
-            }
-        }
-
+        // Kirim event sukses
         ClipStatusUpdated::dispatch(
             $this->clip->id,
             $this->clip->video_id,
@@ -321,19 +240,10 @@ class ProcessVideoClipJob implements ShouldQueue
     private function resolveFfmpeg(): string
     {
         if ($envPath = env('FFMPEG_PATH')) return $envPath;
-
         if (PHP_OS_FAMILY === 'Windows') {
             $default = 'C:\\ffmpeg\\bin\\ffmpeg.exe';
             if (File::exists($default)) return $default;
-        } else {
-            foreach (['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'] as $path) {
-                if (File::exists($path)) return $path;
-            }
         }
-
-        $projectPath = base_path(PHP_OS_FAMILY === 'Windows' ? 'ffmpeg.exe' : 'ffmpeg');
-        if (File::exists($projectPath)) return $projectPath;
-
         return 'ffmpeg';
     }
 
@@ -347,15 +257,14 @@ class ProcessVideoClipJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error("ProcessVideoClipJob permanently failed for clip ID {$this->clip->id}: " . $exception->getMessage());
-        $this->clip->update(['status' => 'failed']);
+        SystemLog::create([
+            'service'  => 'SYSTEM',
+            'level'    => 'ERROR',
+            'category' => 'JOB_FAILED',
+            'user_id'  => $this->clip->video->user_id ?? null,
+            'message'  => "Job ProcessVideoClipJob gagal permanen: " . $exception->getMessage(),
+        ]);
 
-        ClipStatusUpdated::dispatch(
-            $this->clip->id,
-            $this->clip->video_id,
-            $this->clip->video->user_id,
-            'failed',
-            'Render klip gagal permanen.'
-        );
+        $this->clip->update(['status' => 'failed']);
     }
 }
