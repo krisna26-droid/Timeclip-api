@@ -121,8 +121,10 @@ class ProcessTranscription implements ShouldQueue
                 ],
             ]);
 
+            // --- LOGIKA HAPUS AUDIO SETELAH BERHASIL ---
             if (File::exists($audioPath)) {
                 File::delete($audioPath);
+                Log::info("File audio sementara dihapus setelah transkripsi berhasil.", ['video_id' => $this->video->id]);
             }
 
             VideoStatusUpdated::dispatch(
@@ -148,6 +150,12 @@ class ProcessTranscription implements ShouldQueue
         } catch (\Throwable $e) {
             Log::error("TRANSCRIPTION FAILED ID {$this->video->id}: " . $e->getMessage());
 
+            // --- LOGIKA HAPUS AUDIO MESKIPUN ERROR ---
+            if (File::exists($audioPath)) {
+                File::delete($audioPath);
+                Log::info("File audio sementara dihapus meskipun terjadi error.");
+            }
+
             // LOG UNTUK ADMIN: Kegagalan Proses Transkripsi
             SystemLog::create([
                 'service'  => 'GEMINI',
@@ -166,10 +174,6 @@ class ProcessTranscription implements ShouldQueue
                 'failed',
                 'Transkripsi gagal: ' . $e->getMessage()
             );
-
-            if (File::exists($audioPath)) {
-                File::delete($audioPath);
-            }
         }
     }
 

@@ -146,7 +146,8 @@ class ProcessVideoClipJob implements ShouldQueue
                     $clipWords    = array_slice($allWordsFromText, $startWordIdx, max(1, $endWordIdx - $startWordIdx + 1));
                     $filteredText = implode(' ', $clipWords);
 
-                    $wordCount = count($clipWords);
+                    // FIX: Menggunakan max(1, ...) untuk mencegah Division by Zero
+                    $wordCount = max(1, count($clipWords));
                     $perWord   = $duration / $wordCount;
                     $current   = 0.0;
 
@@ -286,29 +287,40 @@ class ProcessVideoClipJob implements ShouldQueue
         }
 
         // STEP 4: UPDATE STATUS & UPLOAD KE SUPABASE
-        // --- BAGIAN INI YANG KITA EDIT UNTUK SUPABASE ---
         try {
             Log::info("Uploading to Supabase...", ['clip_id' => $this->clip->id]);
 
             // Upload Video
             if (File::exists($outputPath)) {
-                Storage::disk('supabase')->put(
+                $uploadedVideo = Storage::disk('supabase')->put(
                     'clips/' . $outputFileName,
                     fopen($outputPath, 'r+'),
                     ['visibility' => 'public', 'ContentType' => 'video/mp4']
                 );
+
+                // HAPUS FILE KLIP LOKAL SETELAH UPLOAD (Ditambah sleep agar tidak terkunci di Windows)
+                if ($uploadedVideo) {
+                    sleep(1);
+                    File::delete($outputPath);
+                }
             }
 
             // Upload Thumbnail
             if ($thumbPath && File::exists($thumbPath)) {
-                Storage::disk('supabase')->put(
+                $uploadedThumb = Storage::disk('supabase')->put(
                     'thumbnails/' . $thumbFileName,
                     fopen($thumbPath, 'r+'),
                     ['visibility' => 'public', 'ContentType' => 'image/jpeg']
                 );
+
+                // HAPUS FILE THUMBNAIL LOKAL SETELAH UPLOAD
+                if ($uploadedThumb) {
+                    sleep(1);
+                    File::delete($thumbPath);
+                }
             }
 
-            Log::info("Upload ke Supabase Berhasil.", ['clip_id' => $this->clip->id]);
+            Log::info("Upload ke Supabase Berhasil dan file lokal dibersihkan.", ['clip_id' => $this->clip->id]);
         } catch (\Throwable $e) {
             Log::error("Gagal Upload ke Supabase: " . $e->getMessage());
         }
@@ -361,10 +373,10 @@ class ProcessVideoClipJob implements ShouldQueue
 
         $supabaseUrl = config('filesystems.disks.supabase.url');
         $supabaseBucket = config('filesystems.disks.supabase.bucket');
-        
+
         $clipUrl = "{$supabaseUrl}/{$supabaseBucket}/clips/{$outputFileName}";
         $thumbnailUrl = $thumbnailPath ? "{$supabaseUrl}/{$supabaseBucket}/{$thumbnailPath}" : null;
-        
+
         ClipStatusUpdated::dispatch(
             $this->clip->id,
             $this->clip->video_id,
@@ -376,6 +388,19 @@ class ProcessVideoClipJob implements ShouldQueue
                 'thumbnail_url' => $thumbnailUrl,
             ]
         );
+
+        // HAPUS VIDEO ASLI JIKA SEMUA KLIP UNTUK VIDEO INI SUDAH SELESAI
+        $remainingClips = Clip::where('video_id', $this->clip->video_id)
+            ->whereIn('status', ['pending', 'rendering'])
+            ->count();
+
+        if ($remainingClips === 0) {
+            if (File::exists($videoInputPath)) {
+                sleep(1);
+                File::delete($videoInputPath);
+                Log::info("PROSES SELESAI: Video asli (master) telah dihapus.", ['video_id' => $video->id]);
+            }
+        }
     }
 
     private function resolveFfmpeg(): string

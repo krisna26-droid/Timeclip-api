@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\VideoController;
 use App\Http\Controllers\Api\ClipController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\TranscriptionController;
+use App\Http\Controllers\Api\PaymentController; // Tambahkan ini
 
 // Import Controller Admin Baru
 use App\Http\Controllers\Api\Admin\AdminStatsController;
@@ -22,6 +23,9 @@ Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login'])->name('login');
 Route::get('/auth/github/redirect', [AuthController::class, 'githubRedirect']);
 Route::get('/auth/github/callback', [AuthController::class, 'githubCallback']);
+
+// Webhook Midtrans (Harus Public agar bisa dipanggil server Midtrans)
+Route::post('/payment/callback', [PaymentController::class, 'callback']);
 
 /*
 |--------------------------------------------------------------------------
@@ -53,6 +57,9 @@ Route::middleware('auth:sanctum')->group(function () {
         ]);
     });
 
+    // Payment / Subscription
+    Route::post('/payment/subscribe', [PaymentController::class, 'subscribe']);
+
     // Video Management
     Route::get('/videos', [VideoController::class, 'index']);
     Route::post('/videos/process', [VideoController::class, 'store']);
@@ -79,21 +86,15 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Admin Routes (Hanya untuk role 'admin')
+    | Admin Routes
     |--------------------------------------------------------------------------
     */
     Route::middleware(['admin'])->prefix('admin')->group(function () {
-
-        // Stats & System Monitoring
         Route::get('/stats', [AdminStatsController::class, 'index']);
         Route::get('/logs', [AdminStatsController::class, 'latestLogs']);
-
-        // User Management CRUD
         Route::get('/users', [AdminUserController::class, 'index']);
         Route::put('/users/{id}', [AdminUserController::class, 'update']);
         Route::delete('/users/{id}', [AdminUserController::class, 'destroy']);
-
-        // Manual Credit Control
         Route::post('/users/{id}/adjust-credits', [AdminUserController::class, 'adjustCredits']);
     });
 });

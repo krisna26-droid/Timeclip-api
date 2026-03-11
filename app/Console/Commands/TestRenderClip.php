@@ -26,9 +26,9 @@ class TestRenderClip extends Command
     public function handle()
     {
         $clips = \App\Models\Clip::where('status', 'rendering')->get();
-            foreach ($clips as $clip) {
-                $this->info("Memproses Klip ID: " . $clip->id);
-                \App\Jobs\ProcessVideoClipJob::dispatch($clip);
-            }
+        foreach ($clips as $clip) {
+            $this->info("Memproses Klip ID: " . $clip->id);
+            \App\Jobs\ProcessVideoClipJob::dispatch($clip);
+        }
     }
 }

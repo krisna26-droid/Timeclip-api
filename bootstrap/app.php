@@ -15,9 +15,14 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware) {
         $middleware->statefulApi();
 
-        // TAMBAHKAN BARIS INI
+        // Mendaftarkan Middleware Alias
         $middleware->alias([
             'admin' => \App\Http\Middleware\IsAdmin::class,
+        ]);
+
+        // Mengecualikan Callback Midtrans dari CSRF Protection
+        $middleware->validateCsrfTokens(except: [
+            'api/payment/callback',
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
