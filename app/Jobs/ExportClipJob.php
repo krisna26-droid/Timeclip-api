@@ -33,15 +33,15 @@ class ExportClipJob implements ShouldQueue
     {
         Log::info("=== STARTING EXPORT (BURN SUBTITLE) ===", ['clip_id' => $this->clip->id]);
 
-        $clip      = $this->clip->fresh(['subtitle', 'video']); // Eager load relations
+        $clip = $this->clip->fresh(['subtitle', 'video']);
 
         if (!$clip) {
             Log::error("Clip tidak ditemukan saat job dijalankan.", ['clip_id' => $this->clip->id]);
             return;
         }
 
-        $subtitle  = $clip->subtitle;
-        $video     = $clip->video;
+        $subtitle = $clip->subtitle;
+        $video    = $clip->video;
 
         if (!$subtitle || empty($subtitle->words)) {
             Log::warning("Tidak ada subtitle untuk di-export.", ['clip_id' => $clip->id]);
@@ -51,7 +51,7 @@ class ExportClipJob implements ShouldQueue
 
         $ffmpegPath = $this->resolveFfmpeg();
         $timestamp  = time();
-        $tempDir    = storage_path('app/temp_exports'); // Gunakan folder spesifik
+        $tempDir    = storage_path('app/temp_exports');
 
         if (!File::exists($tempDir)) {
             File::makeDirectory($tempDir, 0755, true);
@@ -66,9 +66,14 @@ class ExportClipJob implements ShouldQueue
             // 1. Download Video
             $this->downloadRawVideo($clip, $rawVideoPath);
 
-            // 2. Generate ASS
-            $duration = (float) $clip->end_time - (float) $clip->start_time;
-            $captionService->generate($subtitle->words, $assPath, $duration);
+            // 2. Generate ASS (FIXED PARAMETERS TO MATCH generateAss)
+            $captionService->generateAss(
+                $subtitle->words,
+                $subtitle->full_text,
+                (float) $clip->start_time,
+                (float) $clip->end_time,
+                $assPath
+            );
 
             if (!File::exists($assPath)) {
                 throw new \Exception("File ASS gagal dibuat: {$assPath}");
@@ -78,7 +83,6 @@ class ExportClipJob implements ShouldQueue
 
             // 3. Render FFmpeg
             $assPathEscaped = $this->escapeAssPath($assPath);
-            // Crop filter disesuaikan agar aspect ratio terjaga (9:16 portrait)
             $videoFilter    = "scale=-1:1080,crop=608:1080:(in_w-608)/2:0,ass='{$assPathEscaped}'";
 
             $command = [
@@ -111,13 +115,14 @@ class ExportClipJob implements ShouldQueue
                 throw new \Exception("FFmpeg export gagal: " . $process->getErrorOutput());
             }
 
-            // 4. Upload ke Supabase menggunakan Stream (Hemat RAM)
+            // 4. Upload ke Supabase
             $supabasePath = 'clips/export/' . $exportFileName;
             $stream = fopen($exportPath, 'r');
             Storage::disk('supabase')->put($supabasePath, $stream, [
                 'visibility' => 'public',
                 'ContentType' => 'video/mp4'
             ]);
+
             if (is_resource($stream)) {
                 fclose($stream);
             }
@@ -133,15 +138,14 @@ class ExportClipJob implements ShouldQueue
                 'service'  => 'FFMPEG',
                 'level'    => 'INFO',
                 'category' => 'EXPORT',
-                'user_id'  => $video->user_id,
+                'user_id'  => $video->user_id, // Menggunakan ID pemilik video
                 'message'  => "Export klip berhasil.",
                 'payload'  => json_encode(['clip_id' => $clip->id, 'path' => $supabasePath])
             ]);
         } catch (\Throwable $e) {
             Log::error("Error saat export: " . $e->getMessage());
-            throw $e; // Throw agar antrean job tahu jika gagal
+            throw $e;
         } finally {
-            // Bersihkan file temp
             $this->cleanupFiles([$rawVideoPath, $exportPath, $assPath]);
         }
     }
@@ -152,9 +156,6 @@ class ExportClipJob implements ShouldQueue
         $supabaseBucket = config('filesystems.disks.supabase.bucket');
         $rawUrl         = "{$supabaseUrl}/{$supabaseBucket}/" . ltrim($clip->clip_path, '/');
 
-        Log::info("Download RAW video.", ['url' => $rawUrl]);
-
-        // Gunakan sinkronisasi ke file langsung untuk menghemat RAM pada file besar
         $resource = fopen($destPath, 'w');
         $response = Http::timeout(300)->sink($resource)->get($rawUrl);
 
@@ -168,7 +169,7 @@ class ExportClipJob implements ShouldQueue
         }
 
         if (!File::exists($destPath) || filesize($destPath) < 100) {
-            throw new \Exception("File RAW hasil download tidak valid atau kosong.");
+            throw new \Exception("File RAW hasil download tidak valid.");
         }
     }
 
@@ -183,11 +184,10 @@ class ExportClipJob implements ShouldQueue
 
     private function escapeAssPath(string $path): string
     {
-        // FFmpeg filter 'ass' membutuhkan escaping khusus untuk path
-        $path = str_replace('\\', '/', $path); // Ubah ke forward slash untuk semua OS
+        $path = str_replace('\\', '/', $path);
         $path = str_replace(':', '\:', $path);
         $path = str_replace(["'", '[', ']'], ["\\'", '\[', '\]'], $path);
-        return $processPath = $path;
+        return $path;
     }
 
     private function resolveFfmpeg(): string
