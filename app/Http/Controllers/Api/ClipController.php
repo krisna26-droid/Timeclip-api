@@ -4,9 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessVideoClipJob;
-use App\Jobs\ExportClipJob; // Baris Baru
+use App\Jobs\ExportClipJob;
 use App\Models\Clip;
-use App\Models\ClipSubtitle; // Baris Baru
+use App\Models\ClipSubtitle;
 use App\Models\Video;
 use App\Services\AIHighlightService;
 use Illuminate\Http\Request;
@@ -42,6 +42,7 @@ class ClipController extends Controller
         // Integrasi Supabase URL logic
         $supabaseUrl    = config('filesystems.disks.supabase.url');
         $supabaseBucket = config('filesystems.disks.supabase.bucket');
+        $baseUrl        = rtrim($supabaseUrl, '/') . '/storage/v1/object/public/' . $supabaseBucket . '/';
 
         return response()->json([
             'status' => 'success',
@@ -51,9 +52,9 @@ class ClipController extends Controller
                 'viral_score'   => (float) $clip->viral_score,
                 'duration'      => round((float) $clip->end_time - (float) $clip->start_time, 2),
                 'video_title'   => (string) $clip->video->title ?? 'Untitled Video',
-                'clip_url'      => $clip->clip_path ? "{$supabaseUrl}/{$supabaseBucket}/{$clip->clip_path}" : null,
-                'export_url'    => $clip->export_path ? "{$supabaseUrl}/{$supabaseBucket}/{$clip->export_path}" : null,
-                'thumbnail_url' => $clip->thumbnail_path ? "{$supabaseUrl}/{$supabaseBucket}/{$clip->thumbnail_path}" : null,
+                'clip_url'      => $clip->clip_path ? $baseUrl . ltrim($clip->clip_path, '/') : null,
+                'export_url'    => $clip->export_path ? $baseUrl . ltrim($clip->export_path, '/') : null,
+                'thumbnail_url' => $clip->thumbnail_path ? $baseUrl . ltrim($clip->thumbnail_path, '/') : null,
                 'created_at'    => $clip->created_at->diffForHumans(),
             ]),
             'meta' => [
@@ -84,6 +85,7 @@ class ClipController extends Controller
 
         $supabaseUrl    = config('filesystems.disks.supabase.url');
         $supabaseBucket = config('filesystems.disks.supabase.bucket');
+        $baseUrl        = rtrim($supabaseUrl, '/') . '/storage/v1/object/public/' . $supabaseBucket . '/';
 
         return response()->json([
             'status'      => 'success',
@@ -95,9 +97,9 @@ class ClipController extends Controller
                 'status'        => (string) $c->status,
                 'start_time'    => (float) $c->start_time,
                 'end_time'      => (float) $c->end_time,
-                'clip_url'      => $c->clip_path ? "{$supabaseUrl}/{$supabaseBucket}/{$c->clip_path}" : null,
-                'export_url'    => $c->export_path ? "{$supabaseUrl}/{$supabaseBucket}/{$c->export_path}" : null,
-                'thumbnail_url' => $c->thumbnail_path ? "{$supabaseUrl}/{$supabaseBucket}/{$c->thumbnail_path}" : null,
+                'clip_url'      => $c->clip_path ? $baseUrl . ltrim($c->clip_path, '/') : null,
+                'export_url'    => $c->export_path ? $baseUrl . ltrim($c->export_path, '/') : null,
+                'thumbnail_url' => $c->thumbnail_path ? $baseUrl . ltrim($c->thumbnail_path, '/') : null,
                 'subtitle'      => $c->subtitle ? [
                     'full_text' => (string) $c->subtitle->full_text,
                     'words'     => $c->subtitle->words,
@@ -122,6 +124,7 @@ class ClipController extends Controller
 
         $supabaseUrl    = config('filesystems.disks.supabase.url');
         $supabaseBucket = config('filesystems.disks.supabase.bucket');
+        $baseUrl        = rtrim($supabaseUrl, '/') . '/storage/v1/object/public/' . $supabaseBucket . '/';
 
         return response()->json([
             'status' => 'success',
@@ -132,9 +135,9 @@ class ClipController extends Controller
                 'status'        => (string) $clip->status,
                 'start_time'    => (float) $clip->start_time,
                 'end_time'      => (float) $clip->end_time,
-                'clip_url'      => $clip->clip_path ? "{$supabaseUrl}/{$supabaseBucket}/{$clip->clip_path}" : null,
-                'export_url'    => $clip->export_path ? "{$supabaseUrl}/{$supabaseBucket}/{$clip->export_path}" : null,
-                'thumbnail_url' => $clip->thumbnail_path ? "{$supabaseUrl}/{$supabaseBucket}/{$clip->thumbnail_path}" : null,
+                'clip_url'      => $clip->clip_path ? $baseUrl . ltrim($clip->clip_path, '/') : null,
+                'export_url'    => $clip->export_path ? $baseUrl . ltrim($clip->export_path, '/') : null,
+                'thumbnail_url' => $clip->thumbnail_path ? $baseUrl . ltrim($clip->thumbnail_path, '/') : null,
                 'parent_video'  => (string) $clip->video->title,
                 'subtitle'      => $clip->subtitle ? [
                     'full_text' => (string) $clip->subtitle->full_text,
@@ -284,7 +287,11 @@ class ClipController extends Controller
             return response()->json(['status' => 'error', 'message' => 'File tidak ditemukan.'], 404);
         }
 
-        return redirect(Storage::url((string) $clip->clip_path));
+        $supabaseUrl    = config('filesystems.disks.supabase.url');
+        $supabaseBucket = config('filesystems.disks.supabase.bucket');
+        $fullUrl        = rtrim($supabaseUrl, '/') . '/storage/v1/object/public/' . $supabaseBucket . '/' . ltrim($clip->clip_path, '/');
+
+        return redirect($fullUrl);
     }
 
     /**
@@ -302,7 +309,11 @@ class ClipController extends Controller
             return response()->json(['status' => 'error', 'message' => 'File tidak ditemukan.'], 404);
         }
 
-        return redirect(Storage::url((string) $clip->clip_path));
+        $supabaseUrl    = config('filesystems.disks.supabase.url');
+        $supabaseBucket = config('filesystems.disks.supabase.bucket');
+        $fullUrl        = rtrim($supabaseUrl, '/') . '/storage/v1/object/public/' . $supabaseBucket . '/' . ltrim($clip->clip_path, '/');
+
+        return redirect($fullUrl);
     }
 
     /**

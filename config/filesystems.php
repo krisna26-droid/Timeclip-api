@@ -55,6 +55,7 @@ return [
             'region' => env('SUPABASE_STORAGE_REGION'),
             'bucket' => env('SUPABASE_STORAGE_BUCKET'),
             'endpoint' => env('SUPABASE_STORAGE_URL'),
+            'url' => env('SUPABASE_BASE_URL'),
             'use_path_style_endpoint' => true, // Wajib true untuk Supabase
             'visibility' => 'public',
             'throw' => true,

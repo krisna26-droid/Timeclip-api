@@ -15,6 +15,7 @@ class Clip extends Model
         'end_time',
         'viral_score',
         'clip_path',
+        'export_path',
         'thumbnail_path',
         'status'
     ];

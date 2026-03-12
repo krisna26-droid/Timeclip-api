@@ -9,8 +9,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('clips', function (Blueprint $table) {
-            // Path video hasil export (sudah ada subtitle dibakar)
-            // null = belum pernah di-export
+            // Menambahkan kolom export_path setelah clip_path
             $table->string('export_path')->nullable()->after('clip_path');
         });
     }

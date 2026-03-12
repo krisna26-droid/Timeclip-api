@@ -33,6 +33,7 @@ class ExportClipJob implements ShouldQueue
     {
         Log::info("=== STARTING EXPORT (BURN SUBTITLE) ===", ['clip_id' => $this->clip->id]);
 
+        // Reload data terbaru dari database
         $clip = $this->clip->fresh(['subtitle', 'video']);
 
         if (!$clip) {
@@ -53,6 +54,7 @@ class ExportClipJob implements ShouldQueue
         $timestamp  = time();
         $tempDir    = storage_path('app/temp_exports');
 
+        // Pastikan direktori temporary tersedia
         if (!File::exists($tempDir)) {
             File::makeDirectory($tempDir, 0755, true);
         }
@@ -63,10 +65,10 @@ class ExportClipJob implements ShouldQueue
         $assPath        = $tempDir . DIRECTORY_SEPARATOR . 'sub_' . $clip->id . '_' . $timestamp . '.ass';
 
         try {
-            // 1. Download Video
+            // 1. Download Video dari Supabase
             $this->downloadRawVideo($clip, $rawVideoPath);
 
-            // 2. Generate ASS (FIXED PARAMETERS TO MATCH generateAss)
+            // 2. Generate file ASS
             $captionService->generateAss(
                 $subtitle->words,
                 $subtitle->full_text,
@@ -81,9 +83,11 @@ class ExportClipJob implements ShouldQueue
 
             Log::info("File ASS dibuat, mulai render FFmpeg.", ['clip_id' => $clip->id]);
 
-            // 3. Render FFmpeg
+            // 3. Render FFmpeg (Burn-in Subtitle)
             $assPathEscaped = $this->escapeAssPath($assPath);
-            $videoFilter    = "scale=-1:1080,crop=608:1080:(in_w-608)/2:0,ass='{$assPathEscaped}'";
+
+            // Filter video: Scale ke 1080p, Crop jadi 9:16 (Portrait), lalu tempel subtitle
+            $videoFilter = "scale=-1:1080,crop=608:1080:(in_w-608)/2:0,ass='{$assPathEscaped}'";
 
             $command = [
                 $ffmpegPath,
@@ -115,7 +119,7 @@ class ExportClipJob implements ShouldQueue
                 throw new \Exception("FFmpeg export gagal: " . $process->getErrorOutput());
             }
 
-            // 4. Upload ke Supabase
+            // 4. Upload hasil render ke Supabase
             $supabasePath = 'clips/export/' . $exportFileName;
             $stream = fopen($exportPath, 'r');
             Storage::disk('supabase')->put($supabasePath, $stream, [
@@ -127,6 +131,7 @@ class ExportClipJob implements ShouldQueue
                 fclose($stream);
             }
 
+            // Update path export di database
             $clip->update(['export_path' => $supabasePath]);
 
             Log::info("Export berhasil diupload ke Supabase.", [
@@ -138,23 +143,30 @@ class ExportClipJob implements ShouldQueue
                 'service'  => 'FFMPEG',
                 'level'    => 'INFO',
                 'category' => 'EXPORT',
-                'user_id'  => $video->user_id, // Menggunakan ID pemilik video
+                'user_id'  => $video->user_id,
                 'message'  => "Export klip berhasil.",
                 'payload'  => json_encode(['clip_id' => $clip->id, 'path' => $supabasePath])
             ]);
         } catch (\Throwable $e) {
-            Log::error("Error saat export: " . $e->getMessage());
+            Log::error("Error saat export Clip ID {$this->clip->id}: " . $e->getMessage());
             throw $e;
         } finally {
+            // Bersihkan file lokal setelah selesai/gagal
             $this->cleanupFiles([$rawVideoPath, $exportPath, $assPath]);
         }
     }
 
     private function downloadRawVideo(Clip $clip, string $destPath): void
     {
-        $supabaseUrl    = config('filesystems.disks.supabase.url');
+        // PERBAIKAN: Pembentukan URL yang benar sesuai standar Supabase
+        $supabaseUrl    = config('filesystems.disks.supabase.url'); // e.g. https://xxx.supabase.co
         $supabaseBucket = config('filesystems.disks.supabase.bucket');
-        $rawUrl         = "{$supabaseUrl}/{$supabaseBucket}/" . ltrim($clip->clip_path, '/');
+
+        // Membersihkan double slash dan memastikan format URL publik benar
+        $cleanPath = ltrim($clip->clip_path, '/');
+        $rawUrl    = rtrim($supabaseUrl, '/') . "/storage/v1/object/public/{$supabaseBucket}/{$cleanPath}";
+
+        Log::info("Downloading RAW video for export.", ['url' => $rawUrl]);
 
         $resource = fopen($destPath, 'w');
         $response = Http::timeout(300)->sink($resource)->get($rawUrl);
@@ -165,11 +177,11 @@ class ExportClipJob implements ShouldQueue
 
         if (!$response->successful()) {
             if (File::exists($destPath)) File::delete($destPath);
-            throw new \Exception("Gagal download RAW video. Status: " . $response->status());
+            throw new \Exception("Gagal download RAW video. Status: " . $response->status() . " URL: " . $rawUrl);
         }
 
         if (!File::exists($destPath) || filesize($destPath) < 100) {
-            throw new \Exception("File RAW hasil download tidak valid.");
+            throw new \Exception("File RAW hasil download tidak valid atau kosong.");
         }
     }
 
@@ -184,6 +196,7 @@ class ExportClipJob implements ShouldQueue
 
     private function escapeAssPath(string $path): string
     {
+        // FFmpeg di Windows membutuhkan escape khusus untuk driver letter (C:\...)
         $path = str_replace('\\', '/', $path);
         $path = str_replace(':', '\:', $path);
         $path = str_replace(["'", '[', ']'], ["\\'", '\[', '\]'], $path);

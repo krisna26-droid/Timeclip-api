@@ -5,20 +5,42 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Video;
+use App\Models\Clip;
+use App\Jobs\DownloadVideoJob;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
-use App\Jobs\DownloadVideoJob;
-use App\Models\Clip;
+use Illuminate\Support\Facades\DB;
 
 class VideoController extends Controller
 {
-    // GET /api/videos
+    /**
+     * Helper privat untuk membangun URL Supabase secara konsisten
+     */
+    private function getFullUrl($path)
+    {
+        if (!$path) return null;
+
+        $supabaseUrl    = config('filesystems.disks.supabase.url');
+        $supabaseBucket = config('filesystems.disks.supabase.bucket');
+        $cleanPath      = ltrim($path, '/');
+
+        return "{$supabaseUrl}/storage/v1/object/public/{$supabaseBucket}/{$cleanPath}";
+    }
+
+    /**
+     * GET /api/videos
+     * List semua video milik user dengan URL file lengkap
+     */
     public function index()
     {
         $videos = Auth::user()
             ->videos()
             ->latest()
-            ->get();
+            ->get()
+            ->map(function ($video) {
+                $video->file_url = $this->getFullUrl($video->video_path);
+                return $video;
+            });
 
         return response()->json([
             'status' => 'success',
@@ -26,7 +48,10 @@ class VideoController extends Controller
         ]);
     }
 
-    // POST /api/videos/process
+    /**
+     * POST /api/videos/process
+     * Submit video baru untuk diproses (Download & AI Analysis)
+     */
     public function store(Request $request)
     {
         $request->validate([
@@ -37,7 +62,7 @@ class VideoController extends Controller
 
         $user = Auth::user();
 
-        // 🔹 Batasi maksimal 2 proses aktif
+        // 1. Batasi maksimal 2 proses aktif agar queue tidak overload
         $active = Video::where('user_id', $user->id)
             ->whereIn('status', ['pending', 'processing'])
             ->count();
@@ -45,50 +70,59 @@ class VideoController extends Controller
         if ($active >= 2) {
             return response()->json([
                 'status'  => 'error',
-                'message' => 'Maksimal 2 proses aktif.'
+                'message' => 'Maksimal 2 proses aktif. Harap tunggu proses sebelumnya selesai.'
             ], 429);
         }
 
-        // 🔹 Cek Kredit
+        // 2. Cek Kredit (Kecuali tier business)
         if ($user->tier !== 'business' && $user->remaining_credits < 10) {
             return response()->json([
                 'status'  => 'error',
-                'message' => 'Kredit tidak cukup (butuh 10).'
+                'message' => 'Kredit tidak cukup (butuh 10 kredit).'
             ], 403);
         }
 
-        $video = Video::create([
-            'user_id'   => $user->id,
-            'title'     => $request->title,
-            'source_url' => $request->url,
-            'duration'  => $request->duration,
-            'status'    => 'pending',
-        ]);
+        // 3. Gunakan DB Transaction agar pembuatan video & potong kredit aman (All or Nothing)
+        try {
+            return DB::transaction(function () use ($request, $user) {
+                $video = Video::create([
+                    'user_id'    => $user->id,
+                    'title'      => $request->title,
+                    'source_url' => $request->url,
+                    'duration'   => $request->duration,
+                    'status'     => 'pending',
+                ]);
 
-        // Dispatch job download
-        DownloadVideoJob::dispatch($video);
+                // Potong kredit
+                if ($user->tier !== 'business') {
+                    $user->decrement('remaining_credits', 10);
+                }
 
-        // Potong kredit setelah job masuk antrean
-        if ($user->tier !== 'business') {
-            $user->decrement('remaining_credits', 10);
+                // Dispatch job download ke antrean background
+                DownloadVideoJob::dispatch($video);
+
+                Log::info("Video ID {$video->id} berhasil masuk antrean oleh User ID {$user->id}");
+
+                return response()->json([
+                    'status'  => 'success',
+                    'message' => 'Video masuk antrean.',
+                    'data'    => $video
+                ], 201);
+            });
+        } catch (\Exception $e) {
+            Log::error("Gagal memproses video store: " . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'Terjadi kesalahan sistem.'], 500);
         }
-
-        Log::info("Video masuk antrean.", [
-            'video_id' => $video->id
-        ]);
-
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'Video masuk antrean.',
-            'data'    => $video
-        ], 201);
     }
 
+    /**
+     * GET /api/dashboard/stats
+     * Statistik ringkas untuk UI Dashboard
+     */
     public function dashboardStats()
     {
         $user = Auth::user();
 
-        // Hitung ringkasan video berdasarkan status
         $stats = [
             'total_videos'     => $user->videos()->count(),
             'processing_now'   => $user->videos()->whereIn('status', ['pending', 'processing'])->count(),
@@ -102,12 +136,17 @@ class VideoController extends Controller
             'status' => 'success',
             'user'   => [
                 'name'              => $user->name,
-                'tier'              => $user->tier, //
-                'remaining_credits' => $user->remaining_credits, //
+                'tier'              => $user->tier,
+                'remaining_credits' => $user->remaining_credits,
             ],
             'stats'  => $stats
         ]);
     }
+
+    /**
+     * GET /api/videos/{id}
+     * Detail satu video
+     */
     public function show($id)
     {
         $video = Auth::user()->videos()->find($id);
@@ -118,6 +157,9 @@ class VideoController extends Controller
                 'message' => 'Video tidak ditemukan.'
             ], 404);
         }
+
+        // Lampirkan URL file jika sudah ada
+        $video->file_url = $this->getFullUrl($video->video_path);
 
         return response()->json([
             'status' => 'success',
