@@ -21,7 +21,7 @@ class ProcessTranscription implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public $video;
-    public $timeout = 900;
+    public $timeout = 1800;
     public $tries = 2;
 
     public function __construct(Video $video)

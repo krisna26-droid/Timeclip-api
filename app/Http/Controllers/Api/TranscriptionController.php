@@ -3,7 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Jobs\ProcessVideoClipJob;
+use App\Models\ClipSubtitle;
 use App\Models\Video;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -39,7 +39,7 @@ class TranscriptionController extends Controller
     }
 
     /**
-     * Update Transcription — simpan edit caption dari user
+     * Update Transcription — simpan edit dari user
      */
     public function update(Request $request, $videoId)
     {
@@ -64,7 +64,6 @@ class TranscriptionController extends Controller
             ], 404);
         }
 
-        // Merge agar data lain di json_data tidak hilang (misal metadata Gemini)
         $transcription->update([
             'full_text' => $request->full_text,
             'json_data' => array_merge(
@@ -78,39 +77,75 @@ class TranscriptionController extends Controller
 
         return response()->json([
             'status'  => 'success',
-            'message' => 'Transkripsi berhasil diperbarui. Siap untuk render ulang.',
+            'message' => 'Transkripsi berhasil diperbarui.',
             'data'    => $transcription
         ]);
     }
 
     /**
-     * Re-render semua klip milik video ini dengan caption yang sudah diedit
+     * Sync subtitle ke semua klip milik video ini
+     * Dipanggil setelah user selesai edit transkripsi di editor
+     * Tidak ada re-render — subtitle adalah data overlay di Frontend
      */
     public function rerender($videoId)
     {
         $video = Video::where('id', $videoId)
             ->where('user_id', Auth::id())
+            ->with(['transcription', 'clips'])
             ->firstOrFail();
+
+        if (!$video->transcription) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Transkripsi tidak ditemukan.'
+            ], 404);
+        }
 
         $clips = $video->clips()->where('status', 'ready')->get();
 
         if ($clips->isEmpty()) {
             return response()->json([
                 'status'  => 'error',
-                'message' => 'Tidak ada klip yang bisa di-render ulang.'
+                'message' => 'Tidak ada klip yang bisa di-sync.'
             ], 404);
         }
 
+        $allWords = $video->transcription->json_data['words'] ?? [];
+        $synced   = 0;
+
         foreach ($clips as $clip) {
-            // Reset status ke rendering lalu dispatch ulang
-            $clip->update(['status' => 'rendering']);
-            ProcessVideoClipJob::dispatch($clip);
+            $clipStart = (float) $clip->start_time;
+            $clipEnd   = (float) $clip->end_time;
+            $duration  = $clipEnd - $clipStart;
+
+            $filteredWords = array_values(array_filter(
+                $allWords,
+                fn($w) => $w['start'] >= $clipStart && $w['start'] < $clipEnd
+            ));
+
+            $normalizedWords = array_map(fn($w) => [
+                'word'  => $w['word'],
+                'start' => round($w['start'] - $clipStart, 3),
+                'end'   => round(min($w['end'] - $clipStart, $duration), 3),
+            ], $filteredWords);
+
+            $filteredText = implode(' ', array_column($normalizedWords, 'word'));
+
+            ClipSubtitle::updateOrCreate(
+                ['clip_id' => $clip->id],
+                [
+                    'full_text' => $filteredText,
+                    'words'     => $normalizedWords,
+                ]
+            );
+
+            $synced++;
         }
 
         return response()->json([
             'status'  => 'success',
-            'message' => count($clips) . ' klip sedang di-render ulang dengan caption baru.',
-            'data'    => ['clips_queued' => count($clips)]
+            'message' => "{$synced} subtitle klip berhasil di-sync dari transkripsi terbaru.",
+            'data'    => ['clips_synced' => $synced]
         ]);
     }
 }

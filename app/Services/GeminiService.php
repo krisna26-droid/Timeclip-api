@@ -12,7 +12,7 @@ class GeminiService
 {
     public function transcribe(string $audioPath): array
     {
-        Log::info("=== GEMINI TRANSCRIPTION START (SINGLE REQUEST MODE) ===");
+        Log::info("=== GEMINI TRANSCRIPTION START (TWO-STEP MODE) ===");
 
         $apiKey = config('services.gemini.key');
         $model  = config('services.gemini.model', 'gemini-2.5-flash');
@@ -23,153 +23,184 @@ class GeminiService
         $totalDuration = $this->getAudioDuration($audioPath);
         Log::info("Durasi audio utuh: {$totalDuration} detik");
 
-        try {
-            $result = $this->transcribeFullFile($audioPath, $apiKey, $model);
-
-            Log::info("Transkripsi berhasil.", [
-                'total_words'  => count($result['words'] ?? []),
-                'text_preview' => substr($result['full_text'] ?? '', 0, 100),
-            ]);
-
-            return $result;
-        } catch (\Throwable $e) {
-            Log::error("Gagal melakukan transkripsi: " . $e->getMessage());
-
-            SystemLog::create([
-                'service'  => 'GEMINI',
-                'level'    => 'ERROR',
-                'category' => 'SYSTEM',
-                'user_id'  => Auth::id(),
-                'message'  => "Exception pada GeminiService: " . $e->getMessage(),
-                'payload'  => ['trace' => substr($e->getTraceAsString(), 0, 1000)]
-            ]);
-
-            throw $e;
-        }
-    }
-
-    private function transcribeFullFile(string $audioPath, string $apiKey, string $model): array
-    {
         $mimeType     = mime_content_type($audioPath);
         $audioContent = base64_encode(file_get_contents($audioPath));
+        $endpoint     = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
 
-        $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+        // STEP 1: Minta full_text saja — ringan, pasti cepat
+        $fullText = $this->requestFullText($audioContent, $mimeType, $endpoint);
+        Log::info("Full text berhasil.", ['preview' => substr($fullText, 0, 100)]);
 
-        $prompt = <<<PROMPT
-Transcribe this audio accurately in its original language.
-Return ONLY a raw JSON object. No markdown, no backticks, no explanation.
-Use this EXACT structure:
-{
-  "full_text": "complete transcription here",
-  "words": [
-    ["word1", 0.0, 0.5],
-    ["word2", 0.6, 1.1]
-  ]
-}
-Rules:
-- "words" is an array of arrays: [word_string, start_seconds, end_seconds]
-- Include EVERY spoken word
-- Timestamps are floats in seconds
-PROMPT;
-
-        $response = Http::timeout(600)
-            ->withHeaders(['Content-Type' => 'application/json'])
-            ->post($endpoint, [
-                "contents" => [
-                    [
-                        "role" => "user",
-                        "parts" => [
-                            ["text" => $prompt],
-                            [
-                                "inline_data" => [
-                                    "mime_type" => $mimeType,
-                                    "data"      => $audioContent
-                                ]
-                            ]
-                        ]
-                    ]
-                ],
-                "generationConfig" => [
-                    "response_mime_type" => "application/json",
-                    "temperature"        => 0.0,
-                    "maxOutputTokens"    => 65536,
-                ]
-            ]);
-
-        if (!$response->successful()) {
-            SystemLog::create([
-                'service'  => 'GEMINI',
-                'level'    => 'ERROR',
-                'category' => 'API_ERROR',
-                'user_id'  => Auth::id(),
-                'message'  => "Gemini API Error: " . $response->status(),
-                'payload'  => ['status' => $response->status(), 'body' => $response->json()]
-            ]);
-
-            throw new \Exception("Gemini API error: " . $response->status() . " - " . $response->body());
-        }
-
-        $data = $response->json();
+        // STEP 2: Minta words + timestamp — kalau gagal, pakai estimasi otomatis
+        $words = $this->requestWords($audioContent, $mimeType, $endpoint, $fullText, $totalDuration);
+        Log::info("Words selesai.", ['count' => count($words)]);
 
         SystemLog::create([
             'service'  => 'GEMINI',
             'level'    => 'INFO',
             'category' => 'USAGE',
             'user_id'  => Auth::id(),
-            'message'  => "Berhasil melakukan transkripsi audio.",
-            'payload'  => ['model' => $model, 'usage' => $data['usageMetadata'] ?? null]
+            'message'  => "Transkripsi 2-step berhasil.",
+            'payload'  => ['model' => $model, 'word_count' => count($words)]
         ]);
 
-        $rawText = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-
-        return $this->parseGeminiResponse($rawText);
+        return [
+            'full_text' => $fullText,
+            'words'     => $words,
+        ];
     }
 
-    private function parseGeminiResponse(string $rawText): array
+    private function requestFullText(string $audioContent, string $mimeType, string $endpoint): string
     {
-        // 1. Bersihkan Karakter Kontrol (Kunci utama perbaikan Control character error)
-        // Menghapus karakter ASCII 0-31 dan 127
-        $clean = preg_replace('/[\x00-\x1F\x7F]/', '', $rawText);
+        $prompt = <<<PROMPT
+Transcribe this audio accurately in its original language.
+Return ONLY a raw JSON object with this exact structure:
+{"full_text": "complete transcription here"}
+No markdown, no backticks, no explanation.
+PROMPT;
 
-        // 2. Bersihkan Markdown Backticks
+        $response = Http::timeout(600)
+            ->withHeaders(['Content-Type' => 'application/json'])
+            ->post($endpoint, [
+                "contents" => [[
+                    "role"  => "user",
+                    "parts" => [
+                        ["text" => $prompt],
+                        ["inline_data" => ["mime_type" => $mimeType, "data" => $audioContent]]
+                    ]
+                ]],
+                "generationConfig" => [
+                    "response_mime_type" => "application/json",
+                    "temperature"        => 0.0,
+                    "maxOutputTokens"    => 8192,
+                ]
+            ]);
+
+        if (!$response->successful()) {
+            throw new \Exception("Gemini full_text request gagal: " . $response->status());
+        }
+
+        $rawText  = $response->json()['candidates'][0]['content']['parts'][0]['text'] ?? '';
+        $clean    = $this->cleanJson($rawText);
+        $parsed   = json_decode($clean, true);
+        $fullText = $parsed['full_text'] ?? '';
+
+        if (empty($fullText)) {
+            throw new \Exception("Full text kosong dari Gemini.");
+        }
+
+        return $fullText;
+    }
+
+    private function requestWords(string $audioContent, string $mimeType, string $endpoint, string $fullText, float $duration): array
+    {
+        try {
+            $prompt = <<<PROMPT
+You already know the transcript of this audio:
+"{$fullText}"
+
+Now provide word-level timestamps for this audio.
+Return ONLY a raw JSON object:
+{
+  "words": [
+    ["word1", 0.0, 0.5],
+    ["word2", 0.6, 1.1]
+  ]
+}
+Rules:
+- Match EXACTLY the words in the transcript above
+- Timestamps are floats in seconds
+- No markdown, no backticks
+PROMPT;
+
+            $response = Http::timeout(600)
+                ->withHeaders(['Content-Type' => 'application/json'])
+                ->post($endpoint, [
+                    "contents" => [[
+                        "role"  => "user",
+                        "parts" => [
+                            ["text" => $prompt],
+                            ["inline_data" => ["mime_type" => $mimeType, "data" => $audioContent]]
+                        ]
+                    ]],
+                    "generationConfig" => [
+                        "response_mime_type" => "application/json",
+                        "temperature"        => 0.0,
+                        "maxOutputTokens"    => 65536,
+                    ]
+                ]);
+
+            if (!$response->successful()) {
+                throw new \Exception("Words request gagal: " . $response->status());
+            }
+
+            $rawText = $response->json()['candidates'][0]['content']['parts'][0]['text'] ?? '';
+            $clean   = $this->cleanJson($rawText);
+            $parsed  = json_decode($clean, true);
+            $words   = $this->normalizeWords($parsed['words'] ?? []);
+
+            if (!empty($words)) {
+                return $words;
+            }
+
+            throw new \Exception("Words kosong dari response.");
+
+        } catch (\Throwable $e) {
+            Log::warning("Words request gagal, pakai estimasi: " . $e->getMessage());
+
+            SystemLog::create([
+                'service'  => 'GEMINI',
+                'level'    => 'WARNING',
+                'category' => 'USAGE',
+                'user_id'  => Auth::id(),
+                'message'  => "Words timestamp gagal, menggunakan estimasi otomatis.",
+                'payload'  => ['error' => $e->getMessage()]
+            ]);
+
+            return $this->estimateWords($fullText, $duration);
+        }
+    }
+
+    private function estimateWords(string $fullText, float $duration): array
+    {
+        $wordList = array_values(array_filter(preg_split('/\s+/', trim($fullText))));
+
+        if (empty($wordList) || $duration <= 0) return [];
+
+        $perWord = $duration / count($wordList);
+        $current = 0.0;
+        $result  = [];
+
+        foreach ($wordList as $word) {
+            $result[] = [
+                'word'  => $word,
+                'start' => round($current, 3),
+                'end'   => round($current + $perWord, 3),
+            ];
+            $current += $perWord;
+        }
+
+        Log::info("Estimasi words selesai.", ['count' => count($result)]);
+
+        return $result;
+    }
+
+    private function cleanJson(string $rawText): string
+    {
+        $clean = preg_replace('/[\x00-\x1F\x7F]/', '', $rawText);
         $clean = trim($clean);
         $clean = preg_replace('/^```json\s*/i', '', $clean);
         $clean = preg_replace('/^```\s*/i',     '', $clean);
         $clean = preg_replace('/```\s*$/i',     '', $clean);
         $clean = trim($clean);
 
-        // 3. Ekstraksi Blok JSON Terluar (Jika ada teks tambahan dari AI)
         $startPos = strpos($clean, '{');
-        $endPos = strrpos($clean, '}');
+        $endPos   = strrpos($clean, '}');
         if ($startPos !== false && $endPos !== false) {
             $clean = substr($clean, $startPos, $endPos - $startPos + 1);
         }
 
-        // 4. Decode JSON Utama
-        $parsed = json_decode($clean, true);
-
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            Log::error("Gagal parse JSON Gemini: " . json_last_error_msg());
-
-            SystemLog::create([
-                'service'  => 'GEMINI',
-                'level'    => 'WARNING',
-                'category' => 'PARSE_ERROR',
-                'user_id'  => Auth::id(),
-                'message'  => "JSON Parse Error, mencoba fallback regex.",
-                'payload'  => ['error' => json_last_error_msg(), 'raw' => substr($clean, 0, 500)]
-            ]);
-
-            return $this->extractFallback($clean);
-        }
-
-        $fullText = $parsed['full_text'] ?? '';
-        $rawWords = $parsed['words'] ?? [];
-
-        return [
-            'full_text' => (string) $fullText,
-            'words'     => $this->normalizeWords($rawWords),
-        ];
+        return $clean;
     }
 
     private function normalizeWords(array $rawWords): array
@@ -192,28 +223,8 @@ PROMPT;
                 ];
             }
         }
+
         return $normalized;
-    }
-
-    private function extractFallback(string $raw): array
-    {
-        Log::warning("Menggunakan fallback ekstraksi manual regex.");
-
-        $fullText = '';
-        $words    = [];
-
-        if (preg_match('/"full_text"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"/s', $raw, $m)) {
-            $fullText = stripslashes($m[1]);
-        }
-
-        if (preg_match('/"words"\s*:\s*(\[.*?\])/s', $raw, $m)) {
-            $decoded = json_decode($m[1], true);
-            if (is_array($decoded)) {
-                $words = $this->normalizeWords($decoded);
-            }
-        }
-
-        return ['full_text' => $fullText, 'words' => $words];
     }
 
     private function getAudioDuration(string $audioPath): float
@@ -221,13 +232,9 @@ PROMPT;
         try {
             $ffprobePath = config('services.ffmpeg.probe_path', env('FFPROBE_PATH', 'ffprobe'));
             $process     = new Process([
-                $ffprobePath,
-                '-v',
-                'error',
-                '-show_entries',
-                'format=duration',
-                '-of',
-                'default=noprint_wrappers=1:nokey=1',
+                $ffprobePath, '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
                 $audioPath
             ]);
             $process->run();

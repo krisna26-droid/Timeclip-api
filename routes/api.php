@@ -80,6 +80,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/clips/{id}/rerender', [ClipController::class, 'rerender']);
     Route::get('/clips/{id}/subtitle', [ClipController::class, 'showSubtitle']);
     Route::put('/clips/{id}/subtitle', [ClipController::class, 'updateSubtitle']);
+    Route::post('/clips/{id}/export', [ClipController::class, 'export']);
 
     // AI Agent Tool
     Route::post('/videos/{video_id}/ask-ai', [ClipController::class, 'askAI']);
