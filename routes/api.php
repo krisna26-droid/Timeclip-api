@@ -97,5 +97,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/users/{id}', [AdminUserController::class, 'update']);
         Route::delete('/users/{id}', [AdminUserController::class, 'destroy']);
         Route::post('/users/{id}/adjust-credits', [AdminUserController::class, 'adjustCredits']);
+
+        Route::get('/transactions', [PaymentController::class, 'getAllTransactions']);
     });
 });

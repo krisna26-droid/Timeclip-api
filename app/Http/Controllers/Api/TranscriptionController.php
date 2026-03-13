@@ -64,15 +64,13 @@ class TranscriptionController extends Controller
             ], 404);
         }
 
+        // Simpan perubahan transkripsi utama
         $transcription->update([
             'full_text' => $request->full_text,
-            'json_data' => array_merge(
-                $transcription->json_data ?? [],
-                [
-                    'full_text' => $request->full_text,
-                    'words'     => $request->words,
-                ]
-            )
+            'json_data' => [
+                'full_text' => $request->full_text,
+                'words'     => $request->words,
+            ]
         ]);
 
         return response()->json([
@@ -84,8 +82,6 @@ class TranscriptionController extends Controller
 
     /**
      * Sync subtitle ke semua klip milik video ini
-     * Dipanggil setelah user selesai edit transkripsi di editor
-     * Tidak ada re-render — subtitle adalah data overlay di Frontend
      */
     public function rerender($videoId)
     {
@@ -118,16 +114,26 @@ class TranscriptionController extends Controller
             $clipEnd   = (float) $clip->end_time;
             $duration  = $clipEnd - $clipStart;
 
+            /**
+             * PERBAIKAN: Tambahkan toleransi 0.2 detik di awal/akhir 
+             * agar kata tidak hilang karena pembulatan atau jeda vokal kecil.
+             */
             $filteredWords = array_values(array_filter(
                 $allWords,
-                fn($w) => $w['start'] >= $clipStart && $w['start'] < $clipEnd
+                fn($w) => $w['start'] >= ($clipStart - 0.2) && $w['start'] < ($clipEnd + 0.2)
             ));
 
-            $normalizedWords = array_map(fn($w) => [
-                'word'  => $w['word'],
-                'start' => round($w['start'] - $clipStart, 3),
-                'end'   => round(min($w['end'] - $clipStart, $duration), 3),
-            ], $filteredWords);
+            $normalizedWords = array_map(function ($w) use ($clipStart, $duration) {
+                // Sesuaikan start dan end kata dengan durasi klip
+                $start = max(0, $w['start'] - $clipStart);
+                $end   = $w['end'] - $clipStart;
+
+                return [
+                    'word'  => $w['word'],
+                    'start' => round($start, 3),
+                    'end'   => round(min($end, $duration), 3),
+                ];
+            }, $filteredWords);
 
             $filteredText = implode(' ', array_column($normalizedWords, 'word'));
 

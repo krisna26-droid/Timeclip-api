@@ -117,4 +117,17 @@ class PaymentController extends Controller
 
         return response()->json(['status' => 'ok']);
     }
+
+    public function getAllTransactions()
+    {
+        // Pastikan hanya admin yang bisa akses (bisa dicek di route middleware)
+        $transactions = Transaction::with('user') // Ambil data user terkait
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return response()->json([
+            'status' => 'success',
+            'data' => $transactions
+        ]);
+    }
 }

@@ -35,7 +35,7 @@ class GeminiService
 
     private function processInChunks(string $audioPath, float $totalDuration, string $apiKey, string $model): array
     {
-        $chunkDuration = 120.0; // Potong per 2 menit (aman untuk token & timeout)
+        $chunkDuration = 120.0; // Potong per 2 menit
         $allWords = [];
         $fullTextParts = [];
 
@@ -58,18 +58,22 @@ class GeminiService
 
                 // 2. Request Full Text untuk Chunk ini
                 $chunkText = $this->requestFullText($audioContent, $mimeType, $endpoint);
-                $fullTextParts[] = $chunkText;
 
-                // 3. Request Word Timestamps untuk Chunk ini
-                $chunkWords = $this->requestWords($audioContent, $mimeType, $endpoint, $chunkText, $actualChunkDuration);
+                // VALIDASI: Pastikan teks tidak kosong sebelum digabung
+                if (!empty(trim($chunkText))) {
+                    $fullTextParts[] = $chunkText;
 
-                // 4. Adjust Timestamp (tambahkan offset $start)
-                foreach ($chunkWords as $w) {
-                    $allWords[] = [
-                        'word'  => $w['word'],
-                        'start' => round($w['start'] + $start, 3),
-                        'end'   => round($w['end'] + $start, 3),
-                    ];
+                    // 3. Request Word Timestamps untuk Chunk ini
+                    $chunkWords = $this->requestWords($audioContent, $mimeType, $endpoint, $chunkText, $actualChunkDuration);
+
+                    // 4. Adjust Timestamp (tambahkan offset $start)
+                    foreach ($chunkWords as $w) {
+                        $allWords[] = [
+                            'word'  => $w['word'],
+                            'start' => round($w['start'] + $start, 3),
+                            'end'   => round($w['end'] + $start, 3),
+                        ];
+                    }
                 }
 
                 File::delete($chunkPath); // Hapus chunk setelah diproses
@@ -77,12 +81,20 @@ class GeminiService
 
             File::deleteDirectory($tempDir);
 
+            $finalFullText = implode(' ', $fullTextParts);
+
+            Log::info("Transcription Chunked Selesai", [
+                'total_words' => count($allWords),
+                'text_length' => strlen($finalFullText)
+            ]);
+
             return [
-                'full_text' => implode(' ', $fullTextParts),
+                'full_text' => $finalFullText,
                 'words'     => $allWords,
             ];
         } catch (\Throwable $e) {
-            File::deleteDirectory($tempDir);
+            if (File::exists($tempDir)) File::deleteDirectory($tempDir);
+            Log::error("Gagal dalam proses chunking: " . $e->getMessage());
             throw $e;
         }
     }
@@ -114,7 +126,7 @@ class GeminiService
             '-acodec',
             'libmp3lame',
             '-b:a',
-            '64k', // Kompres bitrate agar base64 tidak raksasa
+            '64k',
             $output
         ]);
         $process->run();
@@ -181,8 +193,6 @@ PROMPT;
             return $this->estimateWords($fullText, $duration);
         }
     }
-
-    // --- HELPER METHODS (DIBIARKAN TETAP SAMA) ---
 
     private function estimateWords(string $fullText, float $duration): array
     {
