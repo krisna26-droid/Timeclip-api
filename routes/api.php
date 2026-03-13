@@ -59,6 +59,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Payment / Subscription
     Route::post('/payment/subscribe', [PaymentController::class, 'subscribe']);
+    Route::get('/payment/status/{order_id}', [PaymentController::class, 'checkStatus']); // Ditambahkan untuk polling status
 
     // Video Management
     Route::get('/videos', [VideoController::class, 'index']);

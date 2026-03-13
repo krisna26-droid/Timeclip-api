@@ -10,12 +10,12 @@ use Midtrans\Config;
 use Midtrans\Snap;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class PaymentController extends Controller
 {
     public function __construct()
     {
-        // Set konfigurasi Midtrans dari file config/services.php
         Config::$serverKey = config('services.midtrans.server_key');
         Config::$isProduction = config('services.midtrans.is_production');
         Config::$isSanitized = true;
@@ -33,7 +33,6 @@ class PaymentController extends Controller
 
         $user = auth()->user();
 
-        // Tentukan harga (Sesuaikan dengan keinginanmu)
         $prices = [
             'starter' => 100000,
             'pro'     => 250000,
@@ -43,7 +42,7 @@ class PaymentController extends Controller
         $amount = $prices[$request->tier_plan];
         $orderId = 'TC-' . Str::upper(Str::random(10));
 
-        // Simpan data transaksi ke database dengan status pending
+        // Simpan data transaksi ke database
         $transaction = Transaction::create([
             'external_id' => $orderId,
             'user_id'     => $user->id,
@@ -52,7 +51,9 @@ class PaymentController extends Controller
             'status'      => 'pending'
         ]);
 
-        // Buat parameter untuk dikirim ke Midtrans
+        // URL Ngrok kamu (Sesuaikan jika berubah)
+        $ngrokUrl = "https://bradly-spumescent-keisha.ngrok-free.dev";
+
         $params = [
             'transaction_details' => [
                 'order_id'     => $orderId,
@@ -62,13 +63,15 @@ class PaymentController extends Controller
                 'first_name' => $user->name,
                 'email'      => $user->email,
             ],
+            // Override notification URL untuk testing di localhost/ngrok
+            'notification_url' => $ngrokUrl . '/api/payment/callback',
+            'callbacks' => [
+                'finish' => config('app.frontend_url') . '/dashboard',
+            ]
         ];
 
         try {
-            // Minta Snap Token dari Midtrans
             $snapToken = Snap::getSnapToken($params);
-
-            // Simpan token ke transaksi
             $transaction->update(['snap_token' => $snapToken]);
 
             return response()->json([
@@ -82,35 +85,44 @@ class PaymentController extends Controller
     }
 
     /**
-     * Tahap 2: Menerima Notifikasi dari Midtrans (Webhook)
-     * Bagian ini yang otomatis mengubah Tier user saat pembayaran lunas
+     * Tahap 2: Webhook Callback
      */
     public function callback(Request $request)
     {
         $serverKey = config('services.midtrans.server_key');
-        $hashed = hash("sha512", $request->order_id . $request->status_code . $request->gross_amount . $serverKey);
+
+        // Midtrans kadang mengirimkan gross_amount dengan .00, kita bersihkan agar signature match
+        $grossAmount = number_format($request->gross_amount, 0, '.', '');
+        $signatureSource = $request->order_id . $request->status_code . $request->gross_amount . $serverKey;
+        $hashed = hash("sha512", $signatureSource);
 
         if ($hashed !== $request->signature_key) {
+            Log::error("Midtrans Signature Invalid", ['order_id' => $request->order_id]);
             return response()->json(['message' => 'Invalid signature'], 403);
         }
 
         $transaction = Transaction::where('external_id', $request->order_id)->first();
         if (!$transaction) return response()->json(['message' => 'Transaction not found'], 404);
 
+        // Idempotency: Jika sudah lunas, jangan proses lagi
+        if ($transaction->status === 'settlement') {
+            return response()->json(['status' => 'ok']);
+        }
+
         $status = $request->transaction_status;
 
         if ($status == 'settlement' || $status == 'capture') {
-            // PEMBAYARAN BERHASIL
-            $transaction->update(['status' => 'settlement']);
+            DB::transaction(function () use ($transaction) {
+                $transaction->update(['status' => 'settlement']);
 
-            // Logika Update Tier & Kredit User
-            $user = User::find($transaction->user_id);
-            $user->tier = $transaction->tier_plan;
+                $user = User::find($transaction->user_id);
+                $user->tier = $transaction->tier_plan;
 
-            // Contoh isi kredit instan sesuai tier
-            $credits = ['starter' => 100, 'pro' => 300, 'business' => 9999];
-            $user->remaining_credits = $credits[$transaction->tier_plan];
-            $user->save();
+                $credits = ['starter' => 100, 'pro' => 300, 'business' => 9999];
+                $user->remaining_credits = $credits[$transaction->tier_plan];
+                $user->save();
+            });
+            Log::info("Payment Successful: " . $request->order_id);
         } elseif (in_array($status, ['cancel', 'expire', 'deny'])) {
             $transaction->update(['status' => 'failed']);
         }
@@ -118,10 +130,26 @@ class PaymentController extends Controller
         return response()->json(['status' => 'ok']);
     }
 
+    /**
+     * Tahap 3: Check Status (Polling untuk Front-end)
+     */
+    public function checkStatus($orderId)
+    {
+        $transaction = Transaction::where('external_id', $orderId)->first();
+
+        if (!$transaction) {
+            return response()->json(['status' => 'error', 'message' => 'Transaction not found'], 404);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'transaction_status' => $transaction->status,
+        ]);
+    }
+
     public function getAllTransactions()
     {
-        // Pastikan hanya admin yang bisa akses (bisa dicek di route middleware)
-        $transactions = Transaction::with('user') // Ambil data user terkait
+        $transactions = Transaction::with('user')
             ->orderBy('created_at', 'desc')
             ->get();
 
