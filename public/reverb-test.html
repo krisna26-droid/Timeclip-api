@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Laravel Reverb Test</title>
+
+<script src="https://cdn.jsdelivr.net/npm/pusher-js@8.2.0/dist/web/pusher.min.js"></script>
+
+<style>
+body{
+    font-family: Arial;
+    padding:40px;
+}
+#log{
+    margin-top:20px;
+    padding:15px;
+    border:1px solid #ccc;
+    height:300px;
+    overflow:auto;
+}
+input{
+    padding:6px;
+    margin-right:10px;
+}
+button{
+    padding:6px 12px;
+}
+</style>
+
+</head>
+
+<body>
+
+<h2>Laravel Reverb Test Client</h2>
+
+<label>User ID</label>
+<input id="userId" value="1">
+
+<button onclick="connect()">Connect</button>
+
+<div id="log"></div>
+
+<script>
+
+let pusher;
+let channel;
+
+function log(msg){
+    document.getElementById("log").innerHTML += "<div>"+msg+"</div>";
+}
+
+function connect(){
+
+    const userId = document.getElementById("userId").value;
+
+    log("Connecting...");
+
+    pusher = new Pusher("n82dtcebxl6x7bpfhshp", {
+
+        cluster: "mt1",
+
+        wsHost: "127.0.0.1",
+        wsPort: 8080,
+
+        forceTLS: false,
+
+        disableStats: true,
+
+        enabledTransports: ['ws'],
+
+        authEndpoint: "http://127.0.0.1:8000/broadcasting/auth"
+
+    });
+
+    pusher.connection.bind("connected", function(){
+        log("WebSocket connected");
+    });
+
+    pusher.connection.bind("error", function(err){
+        log("Connection error: " + JSON.stringify(err));
+    });
+
+    channel = pusher.subscribe(`private-App.Models.User.${userId}`);
+
+    channel.bind("pusher:subscription_succeeded", function() {
+        log("Subscribed to channel");
+    });
+
+    channel.bind("pusher:subscription_error", function(status) {
+        log("Subscription error: " + status);
+    });
+
+    channel.bind_global(function(event,data){
+        log("Event: " + event);
+        log(JSON.stringify(data));
+    });
+
+}
+
+</script>
+
+</body>
+</html>
