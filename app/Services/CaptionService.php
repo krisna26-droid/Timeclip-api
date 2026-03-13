@@ -18,17 +18,6 @@ class CaptionService
 
         if (empty($words)) {
             Log::info("Words kosong, estimasi otomatis.");
-
-            // LOG UNTUK ADMIN: Peringatan bahwa AI tidak memberikan timestamp kata per kata
-            SystemLog::create([
-                'service'  => 'FFMPEG',
-                'level'    => 'WARNING',
-                'category' => 'RENDER',
-                'user_id'  => Auth::id(),
-                'message'  => "Timestamp kata kosong, menggunakan estimasi otomatis.",
-                'payload'  => ['text_length' => strlen($fullText)]
-            ]);
-
             $words = $this->estimateWordTimestamps($fullText, $clipStart, $clipEnd);
         }
 
@@ -64,7 +53,8 @@ class CaptionService
                 return;
             }
 
-            $assContent = $this->buildYoutubeKaraokeStyle($normalized);
+            // MENGGUNAKAN LOGIC BARU: Build dengan deteksi jeda diam agar fokus ke suara manusia
+            $assContent = $this->buildSmartKaraokeStyle($normalized);
 
             file_put_contents(
                 $outputPath,
@@ -75,58 +65,44 @@ class CaptionService
                 'path' => $outputPath
             ]);
 
-            // LOG UNTUK ADMIN: Berhasil render subtitle (Audit Trail)
             SystemLog::create([
                 'service'  => 'FFMPEG',
                 'level'    => 'INFO',
                 'category' => 'RENDER',
                 'user_id'  => Auth::id(),
-                'message'  => "File ASS karaoke berhasil dibuat.",
+                'message'  => "File ASS karaoke berhasil dibuat dengan sinkronisasi vokal.",
                 'payload'  => ['output_path' => basename($outputPath), 'word_count' => count($normalized)]
             ]);
         } catch (\Throwable $e) {
             Log::error("Gagal generate ASS: " . $e->getMessage());
-
-            // LOG UNTUK ADMIN: Error fatal saat render
-            SystemLog::create([
-                'service'  => 'FFMPEG',
-                'level'    => 'ERROR',
-                'category' => 'RENDER',
-                'user_id'  => Auth::id(),
-                'message'  => "Gagal membuat file subtitle ASS: " . $e->getMessage(),
-                'payload'  => ['trace' => substr($e->getTraceAsString(), 0, 500)]
-            ]);
-
             throw $e;
         }
     }
 
-    /**
-     * ==========================================
-     * BUILD YOUTUBE KARAOKE STYLE (FIXED)
-     * ==========================================
-     */
-    private function buildYoutubeKaraokeStyle(array $words): string
+    private function buildSmartKaraokeStyle(array $words): string
     {
         if (empty($words)) return '';
 
+        // PlayRes: 720x1280 (Standard Portrait)
+        // Style: Primary & Secondary Putih (&H00FFFFFF), Outline Hitam tebal (3), Shadow (1)
         $header = <<<ASS
 [Script Info]
 ScriptType: v4.00+
-PlayResX: 608
-PlayResY: 1080
+PlayResX: 720
+PlayResY: 1280
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: YT,Arial,58,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,60,60,140,1
+Style: YT,Arial,65,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00333333,-1,0,0,0,100,100,0,0,1,3,1,2,70,70,220,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 ASS;
 
-        $groups = $this->splitByDuration($words, 3.0);
+        // Grouping berdasarkan jeda diam (Silence Detection)
+        $groups = $this->groupWordsBySilence($words, 0.35, 5);
         $dialogues = '';
 
         foreach ($groups as $group) {
@@ -136,18 +112,22 @@ ASS;
             $end   = $this->toAssTime(end($group)['end']);
 
             $karaokeText = '';
-            $lines = $this->splitBalancedLines($group);
+            $currentPos = $group[0]['start'];
 
-            foreach ($lines as $lineIndex => $lineWords) {
-                foreach ($lineWords as $i => $wordData) {
-                    $duration = $wordData['end'] - $wordData['start'];
-                    $centiseconds = max(1, (int) round($duration * 100));
-                    $karaokeText .= "{\\k{$centiseconds}}" . $wordData['word'] . " ";
+            foreach ($group as $wordData) {
+                // Tambahkan tag jeda jika ada gap waktu antar kata dalam satu baris
+                $gap = $wordData['start'] - $currentPos;
+                if ($gap > 0.01) {
+                    $gapCs = (int) round($gap * 100);
+                    $karaokeText .= "{\\k{$gapCs}}";
                 }
 
-                if ($lineIndex === 0 && count($lines) > 1) {
-                    $karaokeText .= "\\N";
-                }
+                $duration = $wordData['end'] - $wordData['start'];
+                $centiseconds = max(1, (int) round($duration * 100));
+
+                // Karaoke tetap putih bersih
+                $karaokeText .= "{\\k{$centiseconds}}" . $wordData['word'] . " ";
+                $currentPos = $wordData['end'];
             }
 
             $dialogues .= "Dialogue: 0,{$start},{$end},YT,,0,0,0,,{$karaokeText}\n";
@@ -156,56 +136,51 @@ ASS;
         return $header . $dialogues;
     }
 
-    private function splitByDuration(array $words, float $maxSeconds): array
+    /**
+     * Membagi kata ke baris baru jika ada jeda diam pembicara
+     */
+    private function groupWordsBySilence(array $words, float $maxSilence, int $maxWords): array
     {
-        if (empty($words)) return [];
-
         $groups = [];
-        $current = [];
-        $startTime = $words[0]['start'];
+        $currentGroup = [];
 
         foreach ($words as $word) {
-            if (empty($current)) {
-                $startTime = $word['start'];
+            if (empty($currentGroup)) {
+                $currentGroup[] = $word;
+                continue;
             }
-            $current[] = $word;
-            if (($word['end'] - $startTime) >= $maxSeconds) {
-                $groups[] = $current;
-                $current = [];
+
+            $prevWord = end($currentGroup);
+            $silence = $word['start'] - $prevWord['end'];
+
+            // Jika diam > 0.35s atau kata sudah > 5, buat baris baru (layar kosong saat diam)
+            if ($silence > $maxSilence || count($currentGroup) >= $maxWords) {
+                $groups[] = $currentGroup;
+                $currentGroup = [$word];
+            } else {
+                $currentGroup[] = $word;
             }
         }
 
-        if (!empty($current)) {
-            $groups[] = $current;
+        if (!empty($currentGroup)) {
+            $groups[] = $currentGroup;
         }
 
         return $groups;
     }
 
-    private function splitBalancedLines(array $group): array
-    {
-        $count = count($group);
-        if ($count <= 6) return [$group];
-        $mid = floor($count / 2);
-
-        return [
-            array_slice($group, 0, $mid),
-            array_slice($group, $mid)
-        ];
-    }
-
     private function estimateWordTimestamps(string $text, float $start, float $end): array
     {
-        $words = explode(' ', trim(preg_replace('/\s+/', ' ', $text)));
-        if (empty($words)) return [];
+        $wordsArray = explode(' ', trim(preg_replace('/\s+/', ' ', $text)));
+        if (empty($wordsArray)) return [];
 
         $duration = max(0.1, $end - $start);
-        $perWord = $duration / count($words);
+        $perWord = $duration / count($wordsArray);
 
         $current = $start;
         $result = [];
 
-        foreach ($words as $word) {
+        foreach ($wordsArray as $word) {
             $result[] = [
                 'word'  => $this->cleanWord($word),
                 'start' => $current,
@@ -222,10 +197,9 @@ ASS;
         $h = floor($seconds / 3600);
         $m = floor(($seconds % 3600) / 60);
         $s = floor($seconds % 60);
-        $fraction = $seconds - floor($seconds);
-        $cs = (int) round($fraction * 100);
+        $cs = (int) round(($seconds - floor($seconds)) * 100);
 
-        if ($cs === 100) {
+        if ($cs >= 100) {
             $cs = 0;
             $s++;
         }
